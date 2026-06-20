@@ -1276,7 +1276,7 @@ class BorgBackupGUI:
 
         ttk.Label(self.ssh_fields_frame, text='Borg Repository URL:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.storage_var = tk.StringVar(value=self.config_data.get('storage', DEFAULT_STORAGE))
-        self.storage_entry = ttk.Entry(self.ssh_fields_frame, textvariable=self.storage_var, width=50)
+        self.storage_entry = ttk.Entry(self.ssh_fields_frame, textvariable=self.storage_var, width=35)
         self.storage_entry.grid(row=0, column=1, sticky='ew', padx=5, pady=2)
 
         ttk.Label(self.ssh_fields_frame, text='SSH Key (Pfad, optional):').grid(row=1, column=0, sticky='e', padx=5, pady=2)
@@ -1297,23 +1297,23 @@ class BorgBackupGUI:
         self.s3_fields_frame.grid(row=1, column=0, columnspan=3, sticky='ew')
         ttk.Label(self.s3_fields_frame, text='Bucket Name:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.s3_storage_var = tk.StringVar(value=self.config_data.get('storage', ''))
-        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_storage_var, width=50).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_storage_var, width=35).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
         ttk.Label(self.s3_fields_frame, text='S3 Access Key:').grid(row=1, column=0, sticky='e', padx=5, pady=2)
         self.s3_access_var = tk.StringVar(value=self.config_data.get('s3_access_key', ''))
-        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_access_var, width=50).grid(row=1, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_access_var, width=35).grid(row=1, column=1, sticky='ew', padx=5, pady=2)
         ttk.Label(self.s3_fields_frame, text='S3 Secret Key:').grid(row=2, column=0, sticky='e', padx=5, pady=2)
         self.s3_secret_var = tk.StringVar(value=self.config_data.get('s3_secret_key', ''))
-        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_secret_var, width=50, show='*').grid(row=2, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_secret_var, width=35, show='*').grid(row=2, column=1, sticky='ew', padx=5, pady=2)
         ttk.Label(self.s3_fields_frame, text='Endpoint URL:').grid(row=3, column=0, sticky='e', padx=5, pady=2)
         self.s3_endpoint_var = tk.StringVar(value=self.config_data.get('s3_endpoint_url', 'https://fsn1.your-objectstorage.com'))
-        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_endpoint_var, width=50).grid(row=3, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_endpoint_var, width=35).grid(row=3, column=1, sticky='ew', padx=5, pady=2)
 
         # === Lokale Felder (sichtbar bei Typ local) ===
         self.local_fields_frame = ttk.Frame(server_frame)
         self.local_fields_frame.grid(row=2, column=0, columnspan=3, sticky='ew')
         ttk.Label(self.local_fields_frame, text='Speicherpfad (Ordner):').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.local_path_var = tk.StringVar(value=self.config_data.get('local_path', ''))
-        ttk.Entry(self.local_fields_frame, textvariable=self.local_path_var, width=50).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Entry(self.local_fields_frame, textvariable=self.local_path_var, width=35).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
         ttk.Button(self.local_fields_frame, text='Wählen', command=self._select_local_path).grid(row=0, column=2, padx=5, pady=2)
 
         # === Gemeinsame Felder ===
@@ -1322,7 +1322,7 @@ class BorgBackupGUI:
 
         ttk.Label(common_frame, text='Passphrase:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.passphrase_var = tk.StringVar(value=self.config_data.get('borg_passphrase', ''))
-        ttk.Entry(common_frame, textvariable=self.passphrase_var, width=50, show='*').grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Entry(common_frame, textvariable=self.passphrase_var, width=35, show='*').grid(row=0, column=1, sticky='ew', padx=5, pady=2)
         ttk.Label(common_frame, text='(leer = interaktiv abfragen)', font=('Arial', 8)).grid(row=1, column=1, sticky='w', padx=5)
 
         ttk.Label(common_frame, text='Kompression:').grid(row=2, column=0, sticky='e', padx=5, pady=2)

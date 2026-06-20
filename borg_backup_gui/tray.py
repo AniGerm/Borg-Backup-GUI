@@ -40,7 +40,7 @@ class TrayIconManager:
 
     def __init__(self, app):
         self.app = app
-        self.master = app.root
+        self.master = app.master
         self.config = app.config
 
         self.tray_icon = None

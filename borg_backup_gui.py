@@ -1037,14 +1037,14 @@ class BorgBackupGUI:
     def _build_backup_tab(self):
         tab = self.tab_backup
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(0, weight=2)  # Config-Bereich
-        tab.rowconfigure(1, weight=3)  # Log-Bereich (mehr Platz)
+        tab.rowconfigure(0, weight=2)
+        tab.rowconfigure(1, weight=3)
 
         top_frame = ttk.Frame(tab)
         top_frame.grid(row=0, column=0, sticky='nsew', padx=10, pady=(10, 5))
         top_frame.columnconfigure(0, weight=1)
         top_frame.columnconfigure(1, weight=1)
-        top_frame.rowconfigure(2, weight=1)
+        top_frame.rowconfigure(1, weight=1)
 
         # Profil-Auswahl
         profile_frame = ttk.Frame(top_frame)
@@ -1059,7 +1059,7 @@ class BorgBackupGUI:
         ttk.Button(profile_frame, text='Löschen', command=self._delete_current_profile).grid(row=0, column=4, padx=(2, 5))
 
         left = ttk.Frame(top_frame)
-        left.grid(row=2, column=0, sticky='nsew', padx=(0, 10))
+        left.grid(row=1, column=0, sticky='nsew', padx=(0, 10))
         left.columnconfigure(0, weight=1)
 
         server_frame = ttk.LabelFrame(left, text='Backend-Konfiguration')
@@ -1106,6 +1106,15 @@ class BorgBackupGUI:
         )
         compression_combo.grid(row=4, column=1, sticky='w', padx=5, pady=2)
 
+        # Backup-Buttons (links unten unter Config)
+        btn_frame = ttk.LabelFrame(left, text='Backup-Aktion')
+        btn_frame.grid(row=1, column=0, sticky='ew', pady=(5, 0))
+        self.backup_btn = ttk.Button(btn_frame, text='Backup jetzt ausführen', command=self._start_backup)
+        self.backup_btn.pack(side='left', padx=5, pady=5)
+        self.stop_btn = ttk.Button(btn_frame, text='Abbrechen', command=self._stop_backup)
+        self.stop_btn.pack(side='left', padx=5, pady=5)
+        self.stop_btn.config(state='disabled')
+
         right = ttk.Frame(top_frame)
         right.grid(row=1, column=1, sticky='nsew', padx=(10, 0))
         right.columnconfigure(0, weight=1)
@@ -1128,14 +1137,6 @@ class BorgBackupGUI:
         self.exclude_text.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
         exc_content = '\n'.join(self.config_data.get('exclude_folders', []))
         self.exclude_text.insert(tk.END, exc_content)
-
-        button_frame = ttk.Frame(top_frame)
-        button_frame.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 10))
-        self.backup_btn = ttk.Button(button_frame, text='Backup jetzt ausfuehren', command=self._start_backup)
-        self.backup_btn.pack(side='left', padx=5)
-        self.stop_btn = ttk.Button(button_frame, text='Abbrechen', command=self._stop_backup)
-        self.stop_btn.pack(side='left', padx=5)
-        self.stop_btn.config(state='disabled')
 
         log_frame = ttk.LabelFrame(tab, text='Live-Log')
         log_frame.grid(row=1, column=0, sticky='nsew', padx=10, pady=(0, 10))

@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 APP="$SCRIPT_DIR/borg_backup_gui.py"
-APP_OLD="$SCRIPT_DIR/hetzner_borg_gui.py"
 VENV_DIR="$SCRIPT_DIR/.venv"
 VENV_PY="$VENV_DIR/bin/python"
 INIT_SCRIPT="$SCRIPT_DIR/install_desktop_launcher.sh"
@@ -89,12 +88,4 @@ fi
 # VS Code Snap-Umgebungsvariablen entfernen (Konflikte mit GTK)
 unset GTK_PATH GTK_EXE_PREFIX GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE GTK_MODULES LD_LIBRARY_PATH
 
-# Neue App bevorzugen, alte als Fallback
-if [[ -f "$APP" ]]; then
-    exec "$VENV_PY" "$APP"
-elif [[ -f "$APP_OLD" ]]; then
-    exec "$VENV_PY" "$APP_OLD"
-else
-    echo "[FEHLER] Keine App-Datei gefunden." >&2
-    exit 1
-fi
+exec "$VENV_PY" "$APP"

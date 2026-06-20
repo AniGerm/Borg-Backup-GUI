@@ -67,7 +67,11 @@ class CommandRunner:
                 self.append_log(f'\n[EXCEPTION] {exc}\n')
             finally:
                 if done_callback:
-                    self.schedule_main(lambda: done_callback(result))
+                    try:
+                        self.schedule_main(lambda: done_callback(result))
+                    except Exception as e:
+                        print(f'[DEBUG] schedule_main failed for run: {e}', flush=True)
+                        done_callback(result)
 
         thread = threading.Thread(target=target, daemon=True)
         thread.start()
@@ -107,7 +111,12 @@ class CommandRunner:
                 result['exception'] = str(exc)
             finally:
                 if done_callback:
-                    self.schedule_main(lambda: done_callback(result))
+                    try:
+                        self.schedule_main(lambda: done_callback(result))
+                    except Exception as e:
+                        # Fallback: direkt aufrufen falls schedule_main fehlschlägt
+                        print(f'[DEBUG] schedule_main failed for run_capture: {e}', flush=True)
+                        done_callback(result)
 
         thread = threading.Thread(target=target, daemon=True)
         thread.start()

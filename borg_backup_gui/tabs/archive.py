@@ -280,7 +280,7 @@ class ArchiveTab:
 
         self.app.archive_runner.stop_flag = False
         self.app.archive_runner.run_capture(cmd, env=env, done_callback=self._on_mount_done)
-        self.app.append_backup_log(f'Mounte Archiv {name}...\n')
+        self.app._append_backup_log(f'Mounte Archiv {name}...\n')
         self.mount_btn.config(text='Mounten...', state='disabled')
 
     def _on_mount_done(self, result):

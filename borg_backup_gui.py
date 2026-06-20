@@ -1130,33 +1130,58 @@ class BorgBackupGUI:
             self.restore_path_var.set(path)
 
     def _borg_env(self):
+        """Liefert Umgebungsvariablen für Borg – je nach Profil-Typ (ssh/s3/local)."""
         env = os.environ.copy()
-        
-        # ssh_cmd: Host Keys beim ersten Mal automatisch akzeptieren. Storage Box (SSH) verlangt Port 23 für Borg!
-        ssh_cmd = ("ssh -p 23"
-                   " -o StrictHostKeyChecking=accept-new"
-                   " -o BatchMode=yes"
-                   " -o ConnectTimeout=30"
-                   " -o ServerAliveInterval=15"
-                   " -o ServerAliveCountMax=3")
-        if self.ssh_key_var.get():
-            ssh_cmd += f" -i {self.ssh_key_var.get()}"
-        env['BORG_RSH'] = ssh_cmd
-        env['BORG_RELOCATED_REPO_ACCESS_IS_OK'] = 'yes'
+        profile_type = self.config_data.get('profile_type', 'ssh')
 
-        # Cache explizit auf User-Home setzen: verhindert Berechtigungskonflikte wenn borg
-        # teilweise als sudo läuft (sudo würde sonst /root/.cache/borg nutzen).
+        # Cache immer setzen
         env['BORG_CACHE_DIR'] = os.path.expanduser('~/.cache/borg')
 
+        if profile_type == 's3':
+            # S3 Object Storage – KEIN BORG_RSH!
+            env['AWS_ACCESS_KEY_ID'] = self.config_data.get('s3_access_key', '')
+            env['AWS_SECRET_ACCESS_KEY'] = self.config_data.get('s3_secret_key', '')
+            if self.config_data.get('s3_endpoint_url'):
+                env['AWS_ENDPOINT_URL'] = self.config_data.get('s3_endpoint_url')
+            if self.config_data.get('s3_region'):
+                env['AWS_DEFAULT_REGION'] = self.config_data.get('s3_region')
+        elif profile_type == 'local':
+            # Lokales Laufwerk – kein BORG_RSH, kein AWS
+            pass
+        else:
+            # SSH / Storage Box (Standard)
+            ssh_cmd = ("ssh -p 23"
+                       " -o StrictHostKeyChecking=accept-new"
+                       " -o BatchMode=yes"
+                       " -o ConnectTimeout=30"
+                       " -o ServerAliveInterval=15"
+                       " -o ServerAliveCountMax=3")
+            if self.ssh_key_var.get():
+                ssh_cmd += f" -i {self.ssh_key_var.get()}"
+            env['BORG_RSH'] = ssh_cmd
+            env['BORG_RELOCATED_REPO_ACCESS_IS_OK'] = 'yes'
+
+        # Passphrase für alle Typen
         if self.passphrase_var.get():
             env['BORG_PASSPHRASE'] = self.passphrase_var.get()
         return env
 
     def _borg_repo(self):
+        """Liefert die Borg-Repository-URL je nach Profil-Typ."""
+        profile_type = self.config_data.get('profile_type', 'ssh')
+
+        if profile_type == 'local':
+            repo = self.config_data.get('local_path', '') or '/tmp/borg-repo'
+            return repo
+
         repo = self.storage_var.get().strip()
 
-        # Korrigiert versehentliches Scp-Format mit Port im Pfad,
-        # z.B. "user@host:23/./backup" -> "user@host:./backup".
+        if profile_type == 's3':
+            if not repo.startswith('s3://'):
+                repo = f's3://{repo}'
+            return repo
+
+        # SSH – Korrigiert versehentliches Scp-Format mit Port im Pfad
         if '://' not in repo and ':' in repo:
             host_part, path_part = repo.split(':', 1)
             if path_part.startswith('23/'):
@@ -1176,10 +1201,10 @@ class BorgBackupGUI:
         # Keine interaktiven Passworteingaben mehr: nur non-interactive sudo.
         # Wenn das System nicht entsprechend vorbereitet ist, scheitert der Befehl sauber ohne Nachfrage.
         if shutil.which('sudo'):
-            # Prüfung direkt gegen borg, da die NOPASSWD-Regel nur für borg gilt (nicht für 'true').
             check = subprocess.run(
                 ['sudo', '-n', '-E', BORG_BIN, '--version'],
-                capture_output=True, text=True
+                capture_output=True, text=True,
+                env=env  # Env mit BORG_RSH/AWS_* übergeben
             )
             if check.returncode != 0:
                 raise PermissionError(

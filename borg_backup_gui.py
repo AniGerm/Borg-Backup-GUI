@@ -410,11 +410,11 @@ class BorgBackupGUI:
                         host_part, path_part = storage.split(':', 1)
                         if path_part.startswith('23/'):
                             data['storage'] = f'{host_part}:{path_part[3:]}'
-                    return data
+                    return self._ensure_profile_keys(data)
         except Exception:
             pass
 
-        return {
+        return self._ensure_profile_keys({
             'storage': DEFAULT_STORAGE,
             'ssh_key': '',
             'include_folders': ['/'],
@@ -440,7 +440,20 @@ class BorgBackupGUI:
             'tray_enabled': True,
             'tray_icon_style': 'disk',
             'privilege_mode': 'auto'
-        }
+        })
+
+    @staticmethod
+    def _ensure_profile_keys(data):
+        """Stellt sicher, dass Profil-Keys vorhanden sind (abwärtskompatibel)."""
+        data.setdefault('profile_type', 'ssh')
+        data.setdefault('profile_name', 'Standard')
+        data.setdefault('profiles', [])
+        data.setdefault('s3_access_key', '')
+        data.setdefault('s3_secret_key', '')
+        data.setdefault('s3_endpoint_url', 'https://fsn1.your-objectstorage.com')
+        data.setdefault('s3_region', 'fsn1')
+        data.setdefault('local_path', '')
+        return data
 
     def _load_status(self):
         try:

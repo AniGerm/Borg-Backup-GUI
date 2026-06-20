@@ -492,12 +492,24 @@ class BorgBackupGUI:
     def _collect_config_from_ui(self):
         if hasattr(self, 'storage_var'):
             self.config_data['storage'] = self.storage_var.get().strip()
+        if hasattr(self, 's3_storage_var') and self.config_data.get('profile_type') == 's3':
+            self.config_data['storage'] = self.s3_storage_var.get().strip()
+        if hasattr(self, 'local_path_var') and self.config_data.get('profile_type') == 'local':
+            self.config_data['local_path'] = self.local_path_var.get().strip()
+            self.config_data['storage'] = self.local_path_var.get().strip()
         if hasattr(self, 'ssh_key_var'):
             self.config_data['ssh_key'] = self.ssh_key_var.get().strip()
         if hasattr(self, 'passphrase_var'):
             self.config_data['borg_passphrase'] = self.passphrase_var.get()
         if hasattr(self, 'compression_var'):
             self.config_data['compression'] = self.compression_var.get().strip() or 'lz4'
+        # S3-spezifisch
+        if hasattr(self, 's3_access_var'):
+            self.config_data['s3_access_key'] = self.s3_access_var.get().strip()
+        if hasattr(self, 's3_secret_var'):
+            self.config_data['s3_secret_key'] = self.s3_secret_var.get()
+        if hasattr(self, 's3_endpoint_var'):
+            self.config_data['s3_endpoint_url'] = self.s3_endpoint_var.get().strip()
         if hasattr(self, 'include_text'):
             includes = [line.strip() for line in self.include_text.get('1.0', tk.END).splitlines() if line.strip()]
             self.config_data['include_folders'] = includes or ['/']
@@ -800,6 +812,19 @@ class BorgBackupGUI:
             self.passphrase_var.set(self.config_data.get('borg_passphrase', ''))
         if hasattr(self, 'compression_var'):
             self.compression_var.set(self.config_data.get('compression', 'lz4'))
+        # S3/Local fields
+        if hasattr(self, 's3_storage_var'):
+            self.s3_storage_var.set(self.config_data.get('storage', ''))
+        if hasattr(self, 's3_access_var'):
+            self.s3_access_var.set(self.config_data.get('s3_access_key', ''))
+        if hasattr(self, 's3_secret_var'):
+            self.s3_secret_var.set(self.config_data.get('s3_secret_key', ''))
+        if hasattr(self, 's3_endpoint_var'):
+            self.s3_endpoint_var.set(self.config_data.get('s3_endpoint_url', ''))
+        if hasattr(self, 'local_path_var'):
+            self.local_path_var.set(self.config_data.get('local_path', ''))
+        # Backend-Felder ein-/ausblenden
+        self._update_backend_fields()
         if hasattr(self, 'schedule_type_var'):
             self.schedule_type_var.set(self.config_data.get('schedule_type', 'manual'))
             self.schedule_interval_var.set(str(self.config_data.get('schedule_interval', 3)))
@@ -1034,6 +1059,26 @@ class BorgBackupGUI:
         self._show_notice(f'Profil "{name}" gelöscht.', level='success')
 
 
+    def _update_backend_fields(self):
+        """Zeigt/versteckt SSH-, S3- und Local-Felder je nach Profil-Typ."""
+        profile_type = self.config_data.get('profile_type', 'ssh')
+        if hasattr(self, 'ssh_fields_frame'):
+            self.ssh_fields_frame.grid_remove()
+        if hasattr(self, 's3_fields_frame'):
+            self.s3_fields_frame.grid_remove()
+        if hasattr(self, 'local_fields_frame'):
+            self.local_fields_frame.grid_remove()
+        if hasattr(self, 'backend_hint_var'):
+            hints = {'ssh': 'SSH / Storage Box mit Port 23', 's3': 'S3 Object Storage (z.B. Hetzner)',
+                     'local': 'Lokales Laufwerk / USB-Festplatte'}
+            self.backend_hint_var.set(f'Aktiver Typ: {hints.get(profile_type, profile_type)}')
+        if profile_type == 'ssh' and hasattr(self, 'ssh_fields_frame'):
+            self.ssh_fields_frame.grid()
+        elif profile_type == 's3' and hasattr(self, 's3_fields_frame'):
+            self.s3_fields_frame.grid()
+        elif profile_type == 'local' and hasattr(self, 'local_fields_frame'):
+            self.local_fields_frame.grid()
+
     def _build_backup_tab(self):
         tab = self.tab_backup
         tab.columnconfigure(0, weight=1)
@@ -1066,45 +1111,72 @@ class BorgBackupGUI:
         server_frame.grid(row=0, column=0, sticky='ew', pady=5)
         server_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(server_frame, text='Borg Repository URL:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
+        # === SSH-Felder (sichtbar bei Typ ssh) ===
+        self.ssh_fields_frame = ttk.Frame(server_frame)
+        self.ssh_fields_frame.grid(row=0, column=0, columnspan=3, sticky='ew')
+
+        ttk.Label(self.ssh_fields_frame, text='Borg Repository URL:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.storage_var = tk.StringVar(value=self.config_data.get('storage', DEFAULT_STORAGE))
-        self.storage_entry = ttk.Entry(server_frame, textvariable=self.storage_var, width=50)
+        self.storage_entry = ttk.Entry(self.ssh_fields_frame, textvariable=self.storage_var, width=50)
         self.storage_entry.grid(row=0, column=1, sticky='ew', padx=5, pady=2)
 
-        ttk.Label(server_frame, text='SSH Key (Pfad, optional):').grid(row=1, column=0, sticky='e', padx=5, pady=2)
-        
+        ttk.Label(self.ssh_fields_frame, text='SSH Key (Pfad, optional):').grid(row=1, column=0, sticky='e', padx=5, pady=2)
         default_ssh_keys = []
         for key in ['id_ed25519', 'id_rsa', 'id_ecdsa']:
             key_path = os.path.expanduser(f'~/.ssh/{key}')
             if os.path.exists(key_path):
                 default_ssh_keys.append(key_path)
-
         self.ssh_key_var = tk.StringVar(value=self.config_data.get('ssh_key', ''))
         if not self.ssh_key_var.get() and default_ssh_keys:
             self.ssh_key_var.set(default_ssh_keys[0])
-
-        ssh_entry = ttk.Combobox(server_frame, textvariable=self.ssh_key_var, values=default_ssh_keys, width=47)
+        ssh_entry = ttk.Combobox(self.ssh_fields_frame, textvariable=self.ssh_key_var, values=default_ssh_keys, width=47)
         ssh_entry.grid(row=1, column=1, sticky='ew', padx=5, pady=2)
-        ttk.Button(server_frame, text='Auswählen', command=self._select_ssh_key).grid(row=1, column=2, padx=5, pady=2)
+        ttk.Button(self.ssh_fields_frame, text='Auswählen', command=self._select_ssh_key).grid(row=1, column=2, padx=5, pady=2)
 
-        ttk.Label(server_frame, text='Repository Passphrase:').grid(row=2, column=0, sticky='e', padx=5, pady=2)
+        # === S3-Felder (sichtbar bei Typ s3) ===
+        self.s3_fields_frame = ttk.Frame(server_frame)
+        self.s3_fields_frame.grid(row=1, column=0, columnspan=3, sticky='ew')
+        ttk.Label(self.s3_fields_frame, text='Bucket Name:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
+        self.s3_storage_var = tk.StringVar(value=self.config_data.get('storage', ''))
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_storage_var, width=50).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Label(self.s3_fields_frame, text='S3 Access Key:').grid(row=1, column=0, sticky='e', padx=5, pady=2)
+        self.s3_access_var = tk.StringVar(value=self.config_data.get('s3_access_key', ''))
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_access_var, width=50).grid(row=1, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Label(self.s3_fields_frame, text='S3 Secret Key:').grid(row=2, column=0, sticky='e', padx=5, pady=2)
+        self.s3_secret_var = tk.StringVar(value=self.config_data.get('s3_secret_key', ''))
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_secret_var, width=50, show='*').grid(row=2, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Label(self.s3_fields_frame, text='Endpoint URL:').grid(row=3, column=0, sticky='e', padx=5, pady=2)
+        self.s3_endpoint_var = tk.StringVar(value=self.config_data.get('s3_endpoint_url', 'https://fsn1.your-objectstorage.com'))
+        ttk.Entry(self.s3_fields_frame, textvariable=self.s3_endpoint_var, width=50).grid(row=3, column=1, sticky='ew', padx=5, pady=2)
+
+        # === Lokale Felder (sichtbar bei Typ local) ===
+        self.local_fields_frame = ttk.Frame(server_frame)
+        self.local_fields_frame.grid(row=2, column=0, columnspan=3, sticky='ew')
+        ttk.Label(self.local_fields_frame, text='Repository Pfad:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
+        self.local_path_var = tk.StringVar(value=self.config_data.get('local_path', ''))
+        ttk.Entry(self.local_fields_frame, textvariable=self.local_path_var, width=50).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Button(self.local_fields_frame, text='Wählen', command=self._select_local_path).grid(row=0, column=2, padx=5, pady=2)
+
+        # === Gemeinsame Felder ===
+        common_frame = ttk.Frame(server_frame)
+        common_frame.grid(row=3, column=0, columnspan=3, sticky='ew')
+
+        ttk.Label(common_frame, text='Passphrase:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.passphrase_var = tk.StringVar(value=self.config_data.get('borg_passphrase', ''))
-        pass_entry = ttk.Entry(server_frame, textvariable=self.passphrase_var, width=50, show='*')
-        pass_entry.grid(row=2, column=1, sticky='ew', padx=5, pady=2)
-        ttk.Label(server_frame, text='(leer = interaktiv abfragen)', font=('Arial', 8)).grid(
-            row=3, column=1, sticky='w', padx=5
-        )
+        ttk.Entry(common_frame, textvariable=self.passphrase_var, width=50, show='*').grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+        ttk.Label(common_frame, text='(leer = interaktiv abfragen)', font=('Arial', 8)).grid(row=1, column=1, sticky='w', padx=5)
 
-        ttk.Label(server_frame, text='Kompression:').grid(row=4, column=0, sticky='e', padx=5, pady=2)
+        ttk.Label(common_frame, text='Kompression:').grid(row=2, column=0, sticky='e', padx=5, pady=2)
         self.compression_var = tk.StringVar(value=self.config_data.get('compression', 'lz4'))
-        compression_combo = ttk.Combobox(
-            server_frame,
-            textvariable=self.compression_var,
-            values=['none', 'lz4', 'zstd,3', 'zstd,6', 'zstd,9'],
-            width=15,
-            state='readonly'
-        )
-        compression_combo.grid(row=4, column=1, sticky='w', padx=5, pady=2)
+        compression_combo = ttk.Combobox(common_frame, textvariable=self.compression_var,
+                                          values=['none', 'lz4', 'zstd,3', 'zstd,6', 'zstd,9'],
+                                          width=15, state='readonly')
+        compression_combo.grid(row=2, column=1, sticky='w', padx=5, pady=2)
+
+        # Backend-Typ-Hinweis
+        self.backend_hint_var = tk.StringVar(value='')
+        ttk.Label(common_frame, textvariable=self.backend_hint_var, font=('Arial', 8),
+                  foreground='#0f766e').grid(row=3, column=1, sticky='w', padx=5)
 
         # Backup-Buttons (links unten unter Config)
         btn_frame = ttk.LabelFrame(left, text='Backup-Aktion')
@@ -1471,6 +1543,12 @@ class BorgBackupGUI:
         if filename:
             self.ssh_key_var.set(filename)
 
+    def _select_local_path(self):
+        path = filedialog.askdirectory(title='Repository-Pfad wählen')
+        if path:
+            self.local_path_var.set(path)
+            self.config_data['local_path'] = path
+
     def _select_restore_target(self):
         path = filedialog.askdirectory(title='Zielverzeichnis fuer Restore')
         if path:
@@ -1518,10 +1596,10 @@ class BorgBackupGUI:
         profile_type = self.config_data.get('profile_type', 'ssh')
 
         if profile_type == 'local':
-            repo = self.config_data.get('local_path', '') or '/tmp/borg-repo'
-            return repo
+            return self.config_data.get('local_path', '') or '/tmp/borg-repo'
 
-        repo = self.storage_var.get().strip()
+        # Speicher-URL aus Config (wird von _collect_config_from_ui aktuell gehalten)
+        repo = self.config_data.get('storage', '').strip()
 
         if profile_type == 's3':
             if not repo.startswith('s3://'):
@@ -1533,7 +1611,9 @@ class BorgBackupGUI:
             host_part, path_part = repo.split(':', 1)
             if path_part.startswith('23/'):
                 repo = f'{host_part}:{path_part[3:]}'
-                self.storage_var.set(repo)
+                self.config_data['storage'] = repo
+                if hasattr(self, 'storage_var'):
+                    self.storage_var.set(repo)
 
         return repo
 

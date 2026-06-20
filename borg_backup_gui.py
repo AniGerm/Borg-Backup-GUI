@@ -378,7 +378,9 @@ class BorgBackupGUI:
         self.master.bind("<<TrayBackupToggle>>", lambda e: self._tray_backup_toggle())
         self.master.bind("<<QuitApp>>", lambda e: self._quit_app())
         self.master.after(120, self._ensure_window_visible)
-        self.master.after(30000, self._periodic_tray_health_check)  # Alle 30s Tray-Gesundheit prüfen
+        self.master.after(30000, self._periodic_tray_health_check)
+        # Profil-Dropdown initialisieren
+        self.master.after(500, self._refresh_profile_combo)
 
         if os.geteuid() == 0:
             messagebox.showwarning(
@@ -1035,10 +1037,11 @@ class BorgBackupGUI:
     def _build_backup_tab(self):
         tab = self.tab_backup
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(1, weight=1)
+        tab.rowconfigure(0, weight=2)  # Config-Bereich
+        tab.rowconfigure(1, weight=3)  # Log-Bereich (mehr Platz)
 
         top_frame = ttk.Frame(tab)
-        top_frame.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
+        top_frame.grid(row=0, column=0, sticky='nsew', padx=10, pady=(10, 5))
         top_frame.columnconfigure(0, weight=1)
         top_frame.columnconfigure(1, weight=1)
         top_frame.rowconfigure(2, weight=1)

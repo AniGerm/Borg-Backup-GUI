@@ -42,9 +42,6 @@ except Exception:
     Gtk = None
     GLib = None
 
-CANARY_DIR = CONFIG_DIR / 'canary'
-CANARY_FILE = CANARY_DIR / 'check.txt'
-
 # ============================================================
 # KONFIGURATION
 # ============================================================
@@ -60,6 +57,9 @@ if not ASSET_ICON_FILE.exists():
 DEFAULT_STORAGE = 'uXXXXXX@uXXXXXX.your-storagebox.de:./backup'
 BORG_BIN = shutil.which('borg') or 'borg'
 INSTANCE_LOCK_HANDLE = None
+
+CANARY_DIR = CONFIG_DIR / 'canary'
+CANARY_FILE = CANARY_DIR / 'check.txt'
 
 # Alte Config-Pfade (für Migration)
 OLD_CONFIG_DIR = Path.home() / '.config' / 'hetzner-borg-gui'

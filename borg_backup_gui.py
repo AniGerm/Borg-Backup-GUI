@@ -381,6 +381,7 @@ class BorgBackupGUI:
         self.master.after(30000, self._periodic_tray_health_check)
         # Profil-Dropdown initialisieren
         self.master.after(500, self._refresh_profile_combo)
+        self.master.after(600, self._refresh_archive_profile_combo)
 
         if os.geteuid() == 0:
             messagebox.showwarning(
@@ -1079,6 +1080,111 @@ class BorgBackupGUI:
         elif profile_type == 'local' and hasattr(self, 'local_fields_frame'):
             self.local_fields_frame.grid()
 
+    def _refresh_archive_profile_combo(self):
+        """Aktualisiert das Profil-Dropdown im Archiv-Tab."""
+        if not hasattr(self, 'archive_profile_combo'):
+            return
+        profiles = self.config_data.get('profiles', [])
+        names = [p['name'] for p in profiles]
+        self.archive_profile_combo['values'] = names
+        current = self.config_data.get('profile_name', '')
+        if current in names:
+            self.archive_profile_combo.set(current)
+        elif names:
+            self.archive_profile_combo.set(names[0])
+
+    def _on_archive_profile_change(self, event=None):
+        """Wechselt das aktive Profil aus dem Archiv-Tab."""
+        name = self.archive_profile_combo.get()
+        if name:
+            self.config.set_active_profile(name) if hasattr(self.config, 'set_active_profile') else None
+            # Profile wechseln via config_data
+            profiles = self.config_data.get('profiles', [])
+            for p in profiles:
+                if p['name'] == name:
+                    from copy import deepcopy
+                    # Nur profile_name aendern, rest beim naechsten Laden
+                    break
+            self.config_data['profile_name'] = name
+            # Alten Cache fuer dieses Profil prüfen
+            if name in self.archive_cache:
+                self._display_archives_from_cache(name)
+            else:
+                self._load_archive_list()
+
+    def _display_archives_from_cache(self, profile_name):
+        """Zeigt gecachte Archivliste an (ohne erneuten Borg-Zugriff)."""
+        cached = self.archive_cache.get(profile_name, [])
+        self.tree.delete(*self.tree.get_children())
+        for name, size, time_str, ptype in cached:
+            if profile_name:
+                pass  # gefiltert durch den Cache-Key
+            self.tree.insert('', tk.END, text=name, values=(size, time_str, ptype))
+        self._apply_archive_filter()
+        self.archive_status_var.set(f'Archivliste geladen: {len(cached)} Archive (Cache)')
+
+    def _refresh_archive_cache(self):
+        """Invalidiert den Cache und laedt im Hintergrund (nach Backup)."""
+        self.archive_cache = {}
+        self.cache_time = None
+        self.master.after(2000, self._load_archive_list)
+
+    def _apply_archive_filter(self, event=None):
+        """Filtert die Archivliste nach eingegebenem Text."""
+        text = self.archive_filter_var.get().lower().strip()
+        for item in self.tree.get_children():
+            name = self.tree.item(item, 'text').lower()
+            if text:
+                self.tree.detach(item) if text not in name else None
+            else:
+                self.tree.reattach(item, '', 'end') if self.tree.exists(item) else None
+        # Vereinfachter Filter: zeige/verstecke Items
+        if text:
+            for item in self.tree.get_children():
+                if text not in self.tree.item(item, 'text').lower():
+                    self.tree.detach(item)
+        else:
+            for item in self.tree.get_children():
+                try:
+                    self.tree.move(item, '', 'end')
+                except tk.TclError:
+                    pass
+
+    def _clear_archive_filter(self):
+        self.archive_filter_var.set('')
+        self._apply_archive_filter()
+
+    def _toggle_mount(self):
+        """Toggelt zwischen Mount und Unmount."""
+        if self.mount_active:
+            self._unmount_archive()
+        else:
+            self._mount_archive()
+
+    def _open_mount_in_fm(self):
+        """Oeffnet den Mount-Punkt im Dateimanager."""
+        if not self.mount_active:
+            return
+        try:
+            import subprocess as _sp
+            _sp.Popen(['xdg-open', self.mount_point])
+        except Exception:
+            messagebox.showerror('Fehler', 'Konnte Dateimanager nicht öffnen.')
+
+    def _unmount_archive(self):
+        """Unmountet das Archiv und aktualisiert Buttons."""
+        import subprocess as _sp
+        try:
+            _sp.run(['borg', 'umount', self.mount_point], capture_output=True, timeout=10)
+        except Exception:
+            _sp.run(['umount', '-l', self.mount_point], capture_output=True)
+        self.mount_active = False
+        self.mounted_archive_name = ''
+        if hasattr(self, 'mount_btn'):
+            self.mount_btn.config(text='Ausgewähltes Archiv mounten')
+        if hasattr(self, 'open_btn'):
+            self.open_btn.config(state='disabled')
+
     def _build_backup_tab(self):
         tab = self.tab_backup
         tab.columnconfigure(0, weight=1)
@@ -1230,34 +1336,63 @@ class BorgBackupGUI:
 
     def _build_archive_tab(self):
         tab = self.tab_archive
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(2, weight=1)
+
         top = ttk.Frame(tab)
-        top.grid(row=0, column=0, sticky='ew', padx=10, pady=10)
-        ttk.Button(top, text='Archivliste laden', command=self._load_archive_list).pack(side='left', padx=5)
+        top.grid(row=0, column=0, sticky='ew', padx=10, pady=(10, 5))
+        ttk.Label(top, text='Profil:').pack(side='left', padx=(0, 5))
+        self.archive_profile_combo = ttk.Combobox(top, state='readonly', width=35)
+        self.archive_profile_combo.pack(side='left', padx=(0, 10))
+        self.archive_profile_combo.bind('<<ComboboxSelected>>', self._on_archive_profile_change)
+
+        self.load_btn = ttk.Button(top, text='Archivliste laden', command=self._load_archive_list)
+        self.load_btn.pack(side='left', padx=2)
         self.archive_status_var = tk.StringVar(value='')
         ttk.Label(top, textvariable=self.archive_status_var).pack(side='left', padx=8)
         self.archive_progress = ttk.Progressbar(top, mode='indeterminate', length=140)
         self.archive_progress.pack(side='left', padx=5)
         self.archive_progress.pack_forget()
 
-        self.tree = ttk.Treeview(tab, columns=('size', 'time'), show='tree headings', selectmode='browse')
+        # Filter
+        filter_frame = ttk.Frame(tab)
+        filter_frame.grid(row=1, column=0, sticky='ew', padx=10, pady=(0, 5))
+        ttk.Label(filter_frame, text='Filter:').pack(side='left', padx=(0, 5))
+        self.archive_filter_var = tk.StringVar(value='')
+        self.archive_filter_entry = ttk.Entry(filter_frame, textvariable=self.archive_filter_var, width=30)
+        self.archive_filter_entry.pack(side='left', padx=(0, 5))
+        self.archive_filter_entry.bind('<KeyRelease>', self._apply_archive_filter)
+        ttk.Button(filter_frame, text='✕', command=self._clear_archive_filter, width=3).pack(side='left')
+
+        self.tree = ttk.Treeview(tab, columns=('size', 'time', 'type'), show='tree headings', selectmode='browse')
         self.tree.heading('#0', text='Archivname')
         self.tree.heading('size', text='Größe')
         self.tree.heading('time', text='Datum')
-        self.tree.column('#0', width=300)
-        self.tree.column('size', width=150)
-        self.tree.column('time', width=200)
-        self.tree.grid(row=1, column=0, sticky='nsew', padx=10, pady=5)
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(1, weight=1)
+        self.tree.heading('type', text='Profil-Typ')
+        self.tree.column('#0', width=280)
+        self.tree.column('size', width=120)
+        self.tree.column('time', width=160)
+        self.tree.column('type', width=80)
+        self.tree.grid(row=2, column=0, sticky='nsew', padx=10, pady=5)
 
         scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=self.tree.yview)
-        scrollbar.grid(row=1, column=1, sticky='ns')
+        scrollbar.grid(row=2, column=1, sticky='ns')
         self.tree.configure(yscrollcommand=scrollbar.set)
 
         btm = ttk.Frame(tab)
-        btm.grid(row=2, column=0, sticky='ew', padx=10, pady=5)
-        ttk.Button(btm, text='Ausgewähltes Archiv mounten', command=self._mount_archive).pack(side='left', padx=5)
-        ttk.Button(btm, text='Ausgewähltes Archiv löschen', command=self._delete_archive).pack(side='left', padx=5)
+        btm.grid(row=3, column=0, sticky='ew', padx=10, pady=5)
+        self.mount_btn = ttk.Button(btm, text='Ausgewähltes Archiv mounten', command=self._toggle_mount)
+        self.mount_btn.pack(side='left', padx=2)
+        self.open_btn = ttk.Button(btm, text='In Dateien öffnen', command=self._open_mount_in_fm, state='disabled')
+        self.open_btn.pack(side='left', padx=2)
+        ttk.Button(btm, text='Ausgewähltes Archiv löschen', command=self._delete_archive).pack(side='left', padx=2)
+
+        # Cache & Mount-State
+        self.archive_cache = {}        # profile_name -> list of tuples
+        self.cache_time = None
+        self.mount_active = False
+        self.mount_point = '/tmp/borg-mount'
+        self.mounted_archive_name = ''
 
     def _build_restore_tab(self):
         tab = self.tab_restore
@@ -2693,9 +2828,14 @@ class BorgBackupGUI:
         if self.archive_list_refresh_pending:
             self.archive_list_refresh_pending = False
             self.master.after(1000, self._load_archive_list)
+        else:
+            # Nach jedem Backup Cache invalidieren + neu laden
+            self._refresh_archive_cache()
 
     def _load_archive_list(self):
         self._save_config()
+        profile_type = self.config_data.get('profile_type', 'ssh')
+        profile_name = self.config_data.get('profile_name', 'Standard')
         repo = self._borg_repo()
 
         if self.backup_running:
@@ -2706,6 +2846,10 @@ class BorgBackupGUI:
         self.archive_loading_token += 1
         self._set_archive_loading(True, 'Archivliste wird geladen...')
         self.tree.delete(*self.tree.get_children())
+
+        # Cache invalidieren
+        self.archive_cache.pop(profile_name, None)
+        self.cache_time = None
 
         env = self._borg_env()
         cmd = [BORG_BIN, 'list', '--lock-wait=30', repo, '--json']
@@ -2727,24 +2871,34 @@ class BorgBackupGUI:
             messagebox.showerror('Fehler', f'borg list fehlgeschlagen:\n{err}')
             return
         try:
+            profile_name = self.config_data.get('profile_name', 'Standard')
+            profile_type = self.config_data.get('profile_type', 'ssh')
             data = json.loads(result['stdout'])
             archives = data.get('archives', [])
             if not archives:
                 self._set_archive_loading(False, 'Keine Archive gefunden.')
+                self.archive_cache[profile_name] = []
+                self.cache_time = datetime.datetime.now()
                 return
 
             token = self.archive_loading_token
             rows = []
+            cache_list = []
             for archive in archives:
                 name = archive.get('name') or archive.get('archive') or '?'
                 time_str = archive.get('time', '?')
                 size = archive.get('stats', {}).get('original_size', None)
                 size_hr = self._human_size(size) if size else 'wird geladen...'
-                item_id = self.tree.insert('', tk.END, text=name, values=(size_hr, time_str))
-                rows.append((item_id, name))
+                item_id = self.tree.insert('', tk.END, text=name, values=(size_hr, time_str, profile_type))
+                rows.append((item_id, name, size_hr, profile_type))
+                cache_list.append((name, size_hr, time_str, profile_type))
+
+            # Cache speichern
+            self.archive_cache[profile_name] = cache_list
+            self.cache_time = datetime.datetime.now()
 
             self._set_archive_loading(True, f'Archivgrößen werden geladen (0/{len(rows)})...')
-            threading.Thread(target=self._populate_archive_sizes_async, args=(rows, token), daemon=True).start()
+            threading.Thread(target=self._populate_archive_sizes_async, args=(rows, token, profile_name), daemon=True).start()
         except Exception as exc:
             self._set_archive_loading(False)
             messagebox.showerror('Fehler', str(exc))
@@ -2762,18 +2916,18 @@ class BorgBackupGUI:
                 if self.archive_progress.winfo_manager():
                     self.archive_progress.pack_forget()
 
-    def _populate_archive_sizes_async(self, rows, token):
+    def _populate_archive_sizes_async(self, rows, token, profile_name=None):
         total = len(rows)
-        for index, (item_id, archive_name) in enumerate(rows, start=1):
+        for index, (item_id, archive_name, _, _ptype) in enumerate(rows, start=1):
             if token != self.archive_loading_token:
                 return
             size_label = self._query_archive_size_label(archive_name)
             self.master.after(
                 0,
-                lambda iid=item_id, size=size_label, idx=index, count=total, current_token=token: self._update_archive_row_size(iid, size, idx, count, current_token)
+                lambda iid=item_id, size=size_label, idx=index, count=total, current_token=token, pn=profile_name: self._update_archive_row_size(iid, size, idx, count, current_token, pn)
             )
 
-    def _update_archive_row_size(self, item_id, size_label, index, total, token):
+    def _update_archive_row_size(self, item_id, size_label, index, total, token, profile_name=None):
         if token != self.archive_loading_token or not self.tree.exists(item_id):
             return
 
@@ -2823,11 +2977,10 @@ class BorgBackupGUI:
 
         name = self.tree.item(selected[0], 'text')
         repo = self._borg_repo()
-        mount_point = '/tmp/borg-mount'
-        os.makedirs(mount_point, exist_ok=True)
+        os.makedirs(self.mount_point, exist_ok=True)
 
         env = self._borg_env()
-        cmd = [BORG_BIN, 'mount', '--lock-wait=30', f'{repo}::{name}', mount_point]
+        cmd = [BORG_BIN, 'mount', '--lock-wait=30', f'{repo}::{name}', self.mount_point]
         cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
 
         self._append_backup_log(f'Mounte Archiv {name}...\n')
@@ -2838,12 +2991,24 @@ class BorgBackupGUI:
         ex = result.get('exception', '')
         if ex:
             messagebox.showerror('Fehler', str(ex))
+            if hasattr(self, 'mount_btn'):
+                self.mount_btn.config(text='Ausgewähltes Archiv mounten')
             return
         if result['exit_code'] != 0:
             err = result['stderr'].strip() or result['stdout'].strip() or 'Unbekannter Fehler'
             messagebox.showerror('Fehler', f'Mount fehlgeschlagen:\n{err}')
+            if hasattr(self, 'mount_btn'):
+                self.mount_btn.config(text='Ausgewähltes Archiv mounten')
             return
-        messagebox.showinfo('Info', f'Archiv gemountet auf /tmp/borg-mount')
+        self.mount_active = True
+        selected = self.tree.selection()
+        if selected:
+            self.mounted_archive_name = self.tree.item(selected[0], 'text')
+        if hasattr(self, 'mount_btn'):
+            self.mount_btn.config(text='Unmounten')
+        if hasattr(self, 'open_btn'):
+            self.open_btn.config(state='normal')
+        self._show_notice(f'Archiv gemountet auf {self.mount_point}', level='success', timeout_ms=5000)
 
     def _delete_archive(self):
         selected = self.tree.selection()
@@ -2874,6 +3039,9 @@ class BorgBackupGUI:
             messagebox.showerror('Fehler', f'Löschen fehlgeschlagen:\n{err}')
             return
         messagebox.showinfo('Info', 'Archiv geloescht.')
+        # Cache invalidieren
+        pname = self.config_data.get('profile_name', 'Standard')
+        self.archive_cache.pop(pname, None)
         self._load_archive_list()
 
     def _start_restore(self):

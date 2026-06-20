@@ -266,6 +266,7 @@ class BorgBackupGUI:
         self.style.configure('Treeview.Heading', background=btn_color, foreground=fg_color, font=('Segoe UI', 10, 'bold'), padding=5)
 
         self.config_data = self._load_config()
+        self._init_profiles_from_config()
         self.status_data = self._load_status()
 
         self.runner = None
@@ -519,6 +520,9 @@ class BorgBackupGUI:
     def _save_config(self):
         try:
             self._collect_config_from_ui()
+            # Aktuelles Profil in der Liste aktualisieren
+            if hasattr(self, '_update_current_profile_in_list'):
+                self._update_current_profile_in_list()
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_FILE, 'w') as file_handle:
                 json.dump(self.config_data, file_handle, indent=4)
@@ -701,6 +705,333 @@ class BorgBackupGUI:
                 font=('Arial', 9)
             ).grid(row=2, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 8))
 
+
+    # ============================================================
+    # PROFIL-VERWALTUNG
+    # ============================================================
+
+    def _init_profiles_from_config(self):
+        """Stellt sicher, dass profiles-Liste mindestens ein Profil enthält."""
+        profiles = self.config_data.get('profiles', [])
+        if not profiles:
+            # Ein Profil aus den flachen Config-Keys bauen
+            profile = {
+                'name': 'Standard',
+                'type': self.config_data.get('profile_type', 'ssh'),
+                'storage': self.config_data.get('storage', ''),
+                'ssh_key': self.config_data.get('ssh_key', ''),
+                'passphrase': self.config_data.get('borg_passphrase', ''),
+                'compression': self.config_data.get('compression', 'lz4'),
+                'include_folders': self.config_data.get('include_folders', ['/']),
+                'exclude_folders': self.config_data.get('exclude_folders', []),
+                'schedule_type': self.config_data.get('schedule_type', 'manual'),
+                'schedule_interval': self.config_data.get('schedule_interval', 3),
+                'schedule_time': self.config_data.get('schedule_time', '03:15'),
+                'catchup_missed': self.config_data.get('catchup_missed', True),
+                'prune_enabled': self.config_data.get('prune_enabled', False),
+                'validate_enabled': self.config_data.get('validate_enabled', True),
+                'validate_interval': self.config_data.get('validate_interval', 3),
+                'optimize_enabled': self.config_data.get('optimize_enabled', False),
+                'optimize_interval': self.config_data.get('optimize_interval', 3),
+                's3_access_key': self.config_data.get('s3_access_key', ''),
+                's3_secret_key': self.config_data.get('s3_secret_key', ''),
+                's3_endpoint_url': self.config_data.get('s3_endpoint_url', ''),
+                's3_region': self.config_data.get('s3_region', ''),
+                'local_path': self.config_data.get('local_path', ''),
+            }
+            profiles.append(profile)
+            self.config_data['profiles'] = profiles
+            self.config_data['profile_name'] = 'Standard'
+            self.config_data['profile_type'] = 'ssh'
+
+    def _refresh_profile_combo(self):
+        """Aktualisiert die Profile-Combo im Backup-Tab."""
+        if not hasattr(self, 'profile_combo'):
+            return
+        profiles = self.config_data.get('profiles', [])
+        names = [p['name'] for p in profiles]
+        self.profile_combo['values'] = names
+        current = self.config_data.get('profile_name', '')
+        if current in names:
+            self.profile_combo.set(current)
+        elif names:
+            self.profile_combo.set(names[0])
+
+    def _apply_profile(self, name):
+        """Lädt ein Profil in die aktive Config und UI."""
+        profiles = self.config_data.get('profiles', [])
+        for p in profiles:
+            if p['name'] == name:
+                self.config_data['profile_name'] = p['name']
+                self.config_data['profile_type'] = p.get('type', 'ssh')
+                self.config_data['storage'] = p.get('storage', '')
+                self.config_data['ssh_key'] = p.get('ssh_key', '')
+                self.config_data['borg_passphrase'] = p.get('passphrase', '')
+                self.config_data['compression'] = p.get('compression', 'lz4')
+                self.config_data['include_folders'] = p.get('include_folders', ['/'])
+                self.config_data['exclude_folders'] = p.get('exclude_folders', [])
+                self.config_data['schedule_type'] = p.get('schedule_type', 'manual')
+                self.config_data['schedule_interval'] = p.get('schedule_interval', 3)
+                self.config_data['schedule_time'] = p.get('schedule_time', '03:15')
+                self.config_data['catchup_missed'] = p.get('catchup_missed', True)
+                self.config_data['prune_enabled'] = p.get('prune_enabled', False)
+                self.config_data['validate_enabled'] = p.get('validate_enabled', True)
+                self.config_data['validate_interval'] = p.get('validate_interval', 3)
+                self.config_data['optimize_enabled'] = p.get('optimize_enabled', False)
+                self.config_data['optimize_interval'] = p.get('optimize_interval', 3)
+                self.config_data['s3_access_key'] = p.get('s3_access_key', '')
+                self.config_data['s3_secret_key'] = p.get('s3_secret_key', '')
+                self.config_data['s3_endpoint_url'] = p.get('s3_endpoint_url', '')
+                self.config_data['s3_region'] = p.get('s3_region', '')
+                self.config_data['local_path'] = p.get('local_path', '')
+                self._sync_config_to_ui()
+                self._refresh_profile_combo()
+                return
+
+    def _sync_config_to_ui(self):
+        """Überträgt config_data in die UI-Variablen (nach Profilwechsel)."""
+        if hasattr(self, 'storage_var'):
+            self.storage_var.set(self.config_data.get('storage', ''))
+        if hasattr(self, 'ssh_key_var'):
+            self.ssh_key_var.set(self.config_data.get('ssh_key', ''))
+        if hasattr(self, 'passphrase_var'):
+            self.passphrase_var.set(self.config_data.get('borg_passphrase', ''))
+        if hasattr(self, 'compression_var'):
+            self.compression_var.set(self.config_data.get('compression', 'lz4'))
+        if hasattr(self, 'schedule_type_var'):
+            self.schedule_type_var.set(self.config_data.get('schedule_type', 'manual'))
+            self.schedule_interval_var.set(str(self.config_data.get('schedule_interval', 3)))
+            self.schedule_time_var.set(self.config_data.get('schedule_time', '03:15'))
+            self.catchup_var.set(bool(self.config_data.get('catchup_missed', True)))
+            self.prune_var.set(bool(self.config_data.get('prune_enabled', False)))
+            self.validate_var.set(bool(self.config_data.get('validate_enabled', True)))
+            self.validate_interval_var.set(str(self.config_data.get('validate_interval', 3)))
+            self.optimize_var.set(bool(self.config_data.get('optimize_enabled', False)))
+            self.optimize_interval_var.set(str(self.config_data.get('optimize_interval', 3)))
+        # Include/Exclude Texts
+        if hasattr(self, 'include_text'):
+            self.include_text.delete('1.0', tk.END)
+            inc = self.config_data.get('include_folders', ['/'])
+            self.include_text.insert(tk.END, '\n'.join(inc))
+        if hasattr(self, 'exclude_text'):
+            self.exclude_text.delete('1.0', tk.END)
+            exc = self.config_data.get('exclude_folders', [])
+            self.exclude_text.insert(tk.END, '\n'.join(exc))
+        if hasattr(self, 'profile_combo'):
+            self._refresh_profile_combo()
+
+    def _update_current_profile_in_list(self):
+        """Speichert aktuelle UI-Werte zurück ins aktive Profil."""
+        profiles = self.config_data.get('profiles', [])
+        name = self.config_data.get('profile_name', '')
+        for i, p in enumerate(profiles):
+            if p['name'] == name:
+                profiles[i]['storage'] = self.config_data.get('storage', '')
+                profiles[i]['ssh_key'] = self.config_data.get('ssh_key', '')
+                profiles[i]['passphrase'] = self.config_data.get('borg_passphrase', '')
+                profiles[i]['compression'] = self.config_data.get('compression', 'lz4')
+                profiles[i]['include_folders'] = self.config_data.get('include_folders', ['/'])
+                profiles[i]['exclude_folders'] = self.config_data.get('exclude_folders', [])
+                profiles[i]['schedule_type'] = self.config_data.get('schedule_type', 'manual')
+                profiles[i]['schedule_interval'] = self.config_data.get('schedule_interval', 3)
+                profiles[i]['schedule_time'] = self.config_data.get('schedule_time', '03:15')
+                profiles[i]['catchup_missed'] = self.config_data.get('catchup_missed', True)
+                profiles[i]['prune_enabled'] = self.config_data.get('prune_enabled', False)
+                profiles[i]['validate_enabled'] = self.config_data.get('validate_enabled', True)
+                profiles[i]['validate_interval'] = self.config_data.get('validate_interval', 3)
+                profiles[i]['optimize_enabled'] = self.config_data.get('optimize_enabled', False)
+                profiles[i]['optimize_interval'] = self.config_data.get('optimize_interval', 3)
+                profiles[i]['s3_access_key'] = self.config_data.get('s3_access_key', '')
+                profiles[i]['s3_secret_key'] = self.config_data.get('s3_secret_key', '')
+                profiles[i]['s3_endpoint_url'] = self.config_data.get('s3_endpoint_url', '')
+                profiles[i]['s3_region'] = self.config_data.get('s3_region', '')
+                profiles[i]['local_path'] = self.config_data.get('local_path', '')
+                break
+
+    def _on_profile_selected(self, event=None):
+        """Wird aufgerufen, wenn der User ein Profil im Dropdown wählt."""
+        name = self.profile_combo.get()
+        if name:
+            self._apply_profile(name)
+            self._on_schedule_change()  # Zeitplan neu berechnen
+
+    def _show_profile_dialog(self):
+        """Dialog zum Erstellen eines neuen Profils."""
+        dialog = tk.Toplevel(self.master)
+        dialog.title('Neues Profil')
+        dialog.geometry('500x500')
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg='#1f2937')
+
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill='both', expand=True)
+
+        row = 0
+        ttk.Label(frame, text='Profil-Name:').grid(row=row, column=0, sticky='e', padx=5, pady=5)
+        name_var = tk.StringVar(value='Neues Profil')
+        ttk.Entry(frame, textvariable=name_var, width=40).grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttk.Label(frame, text='Backend-Typ:').grid(row=row, column=0, sticky='e', padx=5, pady=5)
+        type_var = tk.StringVar(value='ssh')
+        type_combo = ttk.Combobox(frame, textvariable=type_var, values=['ssh', 's3', 'local'],
+                                   state='readonly', width=15)
+        type_combo.grid(row=row, column=1, sticky='w', padx=5, pady=5)
+
+        row += 1
+        # Hinweis
+        hint_var = tk.StringVar(value='')
+        hint_label = ttk.Label(frame, textvariable=hint_var, wraplength=400)
+        hint_label.grid(row=row, column=0, columnspan=2, sticky='w', padx=5, pady=5)
+
+        def _on_type_change(*_args):
+            t = type_var.get()
+            hints = {
+                'ssh': 'SSH: user@host:./backup (Hetzner Storage Box, beliebiger Server)',
+                's3': 'S3: Bucket-Name + Access Keys + Endpoint',
+                'local': 'Lokal: Pfad zu einem Verzeichnis auf der Festplatte'
+            }
+            hint_var.set(hints.get(t, ''))
+
+        type_var.trace_add('write', _on_type_change)
+        _on_type_change()
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=row + 1, column=0, columnspan=2, pady=20)
+        ttk.Button(btn_frame, text='Abbrechen', command=dialog.destroy).pack(side='left', padx=5)
+
+        def _save():
+            profiles = self.config_data.get('profiles', [])
+            names = {p['name'] for p in profiles}
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror('Fehler', 'Bitte einen Namen eingeben.')
+                return
+            if name in names:
+                messagebox.showerror('Fehler', 'Dieser Name existiert bereits.')
+                return
+
+            new_profile = {
+                'name': name,
+                'type': type_var.get(),
+                'storage': '',
+                'ssh_key': '',
+                'passphrase': '',
+                'compression': 'lz4',
+                'include_folders': ['/'],
+                'exclude_folders': [],
+                'schedule_type': 'manual',
+                'schedule_interval': 3,
+                'schedule_time': '03:15',
+                'catchup_missed': True,
+                'prune_enabled': False,
+                'validate_enabled': True,
+                'validate_interval': 3,
+                'optimize_enabled': False,
+                'optimize_interval': 3,
+                's3_access_key': '',
+                's3_secret_key': '',
+                's3_endpoint_url': '',
+                's3_region': '',
+                'local_path': '',
+            }
+            profiles.append(new_profile)
+            self.config_data['profiles'] = profiles
+            self._apply_profile(name)
+            self._save_config()
+            dialog.destroy()
+            self._show_notice(f'Profil "{name}" erstellt.', level='success')
+
+        ttk.Button(btn_frame, text='Erstellen', command=_save).pack(side='left', padx=5)
+        self.master.wait_window(dialog)
+
+    def _show_profile_dialog_edit(self):
+        """Editier-Dialog für das aktive Profil."""
+        name = self.config_data.get('profile_name', '')
+        profiles = self.config_data.get('profiles', [])
+        profile = None
+        for p in profiles:
+            if p['name'] == name:
+                profile = p
+                break
+        if not profile:
+            messagebox.showerror('Fehler', 'Kein Profil ausgewählt.')
+            return
+
+        dialog = tk.Toplevel(self.master)
+        dialog.title(f'Profil bearbeiten: {name}')
+        dialog.geometry('500x450')
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg='#1f2937')
+
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill='both', expand=True)
+
+        row = 0
+        ttk.Label(frame, text='Profil-Name:').grid(row=row, column=0, sticky='e', padx=5, pady=5)
+        name_var = tk.StringVar(value=profile['name'])
+        ttk.Entry(frame, textvariable=name_var, width=40).grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttk.Label(frame, text='Backend-Typ:').grid(row=row, column=0, sticky='e', padx=5, pady=5)
+        type_var = tk.StringVar(value=profile.get('type', 'ssh'))
+        type_combo = ttk.Combobox(frame, textvariable=type_var, values=['ssh', 's3', 'local'],
+                                   state='readonly', width=15)
+        type_combo.grid(row=row, column=1, sticky='w', padx=5, pady=5)
+
+        row += 1
+        ttk.Label(frame, text='Repository / Pfad:').grid(row=row, column=0, sticky='e', padx=5, pady=5)
+        storage_var = tk.StringVar(value=profile.get('storage', ''))
+        ttk.Entry(frame, textvariable=storage_var, width=40).grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttk.Label(frame, text='SSH-Key:').grid(row=row, column=0, sticky='e', padx=5, pady=5)
+        ssh_key_var = tk.StringVar(value=profile.get('ssh_key', ''))
+        ttk.Entry(frame, textvariable=ssh_key_var, width=40).grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttk.Label(frame, text='Passphrase:').grid(row=row, column=0, sticky='e', padx=5, pady=5)
+        passphrase_var = tk.StringVar(value=profile.get('passphrase', ''))
+        ttk.Entry(frame, textvariable=passphrase_var, width=40, show='*').grid(row=row, column=1, padx=5, pady=5)
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=row + 1, column=0, columnspan=2, pady=20)
+        ttk.Button(btn_frame, text='Abbrechen', command=dialog.destroy).pack(side='left', padx=5)
+
+        def _save():
+            profile['name'] = name_var.get().strip()
+            profile['type'] = type_var.get()
+            profile['storage'] = storage_var.get().strip()
+            profile['ssh_key'] = ssh_key_var.get().strip()
+            profile['passphrase'] = passphrase_var.get()
+            self._apply_profile(profile['name'])
+            self._save_config()
+            dialog.destroy()
+            self._show_notice(f'Profil "{profile["name"]}" aktualisiert.', level='success')
+
+        ttk.Button(btn_frame, text='Speichern', command=_save).pack(side='left', padx=5)
+        self.master.wait_window(dialog)
+
+    def _delete_current_profile(self):
+        """Löscht das aktive Profil."""
+        profiles = self.config_data.get('profiles', [])
+        name = self.config_data.get('profile_name', '')
+        if len(profiles) <= 1:
+            messagebox.showwarning('Hinweis', 'Das letzte Profil kann nicht gelöscht werden.')
+            return
+        if not messagebox.askyesno('Löschen', f'Profil "{name}" wirklich löschen?'):
+            return
+        profiles = [p for p in profiles if p['name'] != name]
+        self.config_data['profiles'] = profiles
+        # Zum ersten Profil wechseln
+        if profiles:
+            self._apply_profile(profiles[0]['name'])
+        self._save_config()
+        self._show_notice(f'Profil "{name}" gelöscht.', level='success')
+
+
     def _build_backup_tab(self):
         tab = self.tab_backup
         tab.columnconfigure(0, weight=1)
@@ -710,13 +1041,25 @@ class BorgBackupGUI:
         top_frame.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
         top_frame.columnconfigure(0, weight=1)
         top_frame.columnconfigure(1, weight=1)
-        top_frame.rowconfigure(1, weight=1)
+        top_frame.rowconfigure(2, weight=1)
+
+        # Profil-Auswahl
+        profile_frame = ttk.Frame(top_frame)
+        profile_frame.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 10))
+        profile_frame.columnconfigure(1, weight=1)
+        ttk.Label(profile_frame, text='Profil:', font=('Arial', 10, 'bold')).grid(row=0, column=0, padx=(0, 5))
+        self.profile_combo = ttk.Combobox(profile_frame, state='readonly', width=40)
+        self.profile_combo.grid(row=0, column=1, sticky='w')
+        self.profile_combo.bind('<<ComboboxSelected>>', self._on_profile_selected)
+        ttk.Button(profile_frame, text='Neu', command=self._show_profile_dialog).grid(row=0, column=2, padx=(5, 2))
+        ttk.Button(profile_frame, text='Bearbeiten', command=self._show_profile_dialog_edit).grid(row=0, column=3, padx=2)
+        ttk.Button(profile_frame, text='Löschen', command=self._delete_current_profile).grid(row=0, column=4, padx=(2, 5))
 
         left = ttk.Frame(top_frame)
-        left.grid(row=1, column=0, sticky='nsew', padx=(0, 10))
+        left.grid(row=2, column=0, sticky='nsew', padx=(0, 10))
         left.columnconfigure(0, weight=1)
 
-        server_frame = ttk.LabelFrame(left, text='Server-Konfiguration (SSH / Storage Box)')
+        server_frame = ttk.LabelFrame(left, text='Backend-Konfiguration')
         server_frame.grid(row=0, column=0, sticky='ew', pady=5)
         server_frame.columnconfigure(1, weight=1)
 
@@ -784,7 +1127,7 @@ class BorgBackupGUI:
         self.exclude_text.insert(tk.END, exc_content)
 
         button_frame = ttk.Frame(top_frame)
-        button_frame.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 10))
+        button_frame.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(0, 10))
         self.backup_btn = ttk.Button(button_frame, text='Backup jetzt ausfuehren', command=self._start_backup)
         self.backup_btn.pack(side='left', padx=5)
         self.stop_btn = ttk.Button(button_frame, text='Abbrechen', command=self._stop_backup)

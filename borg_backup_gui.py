@@ -1085,9 +1085,10 @@ class BorgBackupGUI:
         if not hasattr(self, 'archive_profile_combo'):
             return
         profiles = self.config_data.get('profiles', [])
-        names = [p['name'] for p in profiles]
+        names = ['Alle Profile'] + [p['name'] for p in profiles]
         self.archive_profile_combo['values'] = names
         current = self.config_data.get('profile_name', '')
+        # 'Alle Profile' nur setzen wenn es mehrere Profile gibt
         if current in names:
             self.archive_profile_combo.set(current)
         elif names:
@@ -1096,21 +1097,73 @@ class BorgBackupGUI:
     def _on_archive_profile_change(self, event=None):
         """Wechselt das aktive Profil aus dem Archiv-Tab."""
         name = self.archive_profile_combo.get()
+        if name == 'Alle Profile':
+            self._load_all_profiles_archives()
+            return
         if name:
-            self.config.set_active_profile(name) if hasattr(self.config, 'set_active_profile') else None
-            # Profile wechseln via config_data
-            profiles = self.config_data.get('profiles', [])
-            for p in profiles:
-                if p['name'] == name:
-                    from copy import deepcopy
-                    # Nur profile_name aendern, rest beim naechsten Laden
-                    break
             self.config_data['profile_name'] = name
-            # Alten Cache fuer dieses Profil prüfen
             if name in self.archive_cache:
                 self._display_archives_from_cache(name)
             else:
                 self._load_archive_list()
+
+    def _load_all_profiles_archives(self):
+        """Laedt Archive von allen Profilen und zeigt sie kombiniert an."""
+        profiles = self.config_data.get('profiles', [])
+        if len(profiles) <= 1:
+            self._load_archive_list()
+            return
+
+        self._set_archive_loading(True, 'Lade Archive aller Profile...')
+        self.tree.delete(*self.tree.get_children())
+        self.archive_loading_token += 1
+        token = self.archive_loading_token
+
+        def _load_sequential(profiles_list, index=0, all_archives=None):
+            if all_archives is None:
+                all_archives = []
+            if index >= len(profiles_list) or token != self.archive_loading_token:
+                # Alle geladen, anzeigen
+                self._set_archive_loading(False, f'Archivliste geladen: {len(all_archives)} Archive (alle Profile)')
+                return
+
+            p = profiles_list[index]
+            self._set_archive_loading(True, f'Lade {p["name"]} ({index+1}/{len(profiles_list)})...')
+
+            from borg_backup_gui.backends import SSHBackend, S3Backend, LocalBackend
+            # Wir brauchen eine Hilfsmethode, die aus einem Profil-Dict Env baut
+            # Einfacher: temporaer config_data setzen
+            saved_type = self.config_data.get('profile_type')
+            saved_name = self.config_data.get('profile_name')
+            self.config_data['profile_type'] = p.get('type', 'ssh')
+            self.config_data['profile_name'] = p['name']
+            self.config_data['storage'] = p.get('storage', '')
+            self.config_data['local_path'] = p.get('local_path', '')
+            self.config_data['s3_access_key'] = p.get('s3_access_key', '')
+            self.config_data['s3_secret_key'] = p.get('s3_secret_key', '')
+            self.config_data['s3_endpoint_url'] = p.get('s3_endpoint_url', '')
+
+            repo = self._borg_repo()
+            env = self._borg_env()
+
+            import subprocess as _sp
+            try:
+                result = _sp.run([BORG_BIN, 'list', '--lock-wait=15', repo, '--json'],
+                                 capture_output=True, text=True, env=env, timeout=30)
+                if result.returncode == 0:
+                    import json as _json
+                    data = _json.loads(result.stdout)
+                    for arch in data.get('archives', []):
+                        name = arch.get('name', '?')
+                        time_str = arch.get('time', '?')
+                        all_archives.append((name, time_str, p['name'], p.get('type', 'ssh')))
+            except Exception:
+                pass
+
+            # Naechstes Profil
+            self.master.after(100, lambda: _load_sequential(profiles_list, index + 1, all_archives))
+
+        _load_sequential(profiles)
 
     def _display_archives_from_cache(self, profile_name):
         """Zeigt gecachte Archivliste an (ohne erneuten Borg-Zugriff)."""
@@ -1258,7 +1311,7 @@ class BorgBackupGUI:
         # === Lokale Felder (sichtbar bei Typ local) ===
         self.local_fields_frame = ttk.Frame(server_frame)
         self.local_fields_frame.grid(row=2, column=0, columnspan=3, sticky='ew')
-        ttk.Label(self.local_fields_frame, text='Repository Pfad:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
+        ttk.Label(self.local_fields_frame, text='Speicherpfad (Ordner):').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.local_path_var = tk.StringVar(value=self.config_data.get('local_path', ''))
         ttk.Entry(self.local_fields_frame, textvariable=self.local_path_var, width=50).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
         ttk.Button(self.local_fields_frame, text='Wählen', command=self._select_local_path).grid(row=0, column=2, padx=5, pady=2)
@@ -2868,6 +2921,10 @@ class BorgBackupGUI:
         if result['exit_code'] != 0:
             self._set_archive_loading(False)
             err = result['stderr'].strip() or result['stdout'].strip() or 'Unbekannter Fehler'
+            # Bei leerem/nicht initiiertem Repository: freundliche Meldung
+            if 'Repository' in err and ('does not exist' in err or 'not found' in err):
+                self._set_archive_loading(False, 'Noch kein Repository initialisiert - führe zuerst ein Backup aus.')
+                return
             messagebox.showerror('Fehler', f'borg list fehlgeschlagen:\n{err}')
             return
         try:

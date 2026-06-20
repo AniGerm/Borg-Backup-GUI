@@ -42,6 +42,9 @@ except Exception:
     Gtk = None
     GLib = None
 
+CANARY_DIR = CONFIG_DIR / 'canary'
+CANARY_FILE = CANARY_DIR / 'check.txt'
+
 # ============================================================
 # KONFIGURATION
 # ============================================================
@@ -457,6 +460,9 @@ class BorgBackupGUI:
         data.setdefault('s3_endpoint_url', 'https://fsn1.your-objectstorage.com')
         data.setdefault('s3_region', 'fsn1')
         data.setdefault('local_path', '')
+        data.setdefault('canary_enabled', True)
+        data.setdefault('canary_last_check', '')
+        data.setdefault('canary_last_result', '')
         return data
 
     def _load_status(self):
@@ -1238,6 +1244,83 @@ class BorgBackupGUI:
         if hasattr(self, 'open_btn'):
             self.open_btn.config(state='disabled')
 
+
+    def _create_canary_file(self):
+        """Erstellt Canary-Datei mit bekanntem Inhalt vor dem Backup."""
+        import hashlib
+        CANARY_DIR.mkdir(parents=True, exist_ok=True)
+        profile_name = self.config_data.get('profile_name', 'Standard')
+        timestamp = datetime.datetime.now().isoformat(timespec='seconds')
+        content_lines = [
+            'BORG-CANARY-CHECK',
+            f'Profile: {profile_name}',
+            f'Timestamp: {timestamp}',
+        ]
+        content_text = '\n'.join(content_lines) + '\n'
+        expected_hash = hashlib.sha256(content_text.encode()).hexdigest()
+        content_lines.append(f'SHA256: {expected_hash}')
+        final_text = '\n'.join(content_lines) + '\n'
+        CANARY_FILE.write_text(final_text)
+        self.canary_expected_hash = expected_hash
+        self.canary_profile_name = profile_name
+        self._append_backup_log(f'\n[Canary] Check-Datei erstellt: {CANARY_FILE}\n')
+        self._append_backup_log(f'[Canary] Erwarteter Hash: {expected_hash[:16]}...\n')
+        return str(CANARY_FILE)
+
+    def _verify_canary(self):
+        """Extrahiert Canary aus dem Archiv und verifiziert den Hash."""
+        import hashlib
+        import subprocess as _sp
+        profile_name = self.canary_profile_name if hasattr(self, 'canary_profile_name') else self.config_data.get('profile_name', 'Standard')
+        expected_hash = self.canary_expected_hash if hasattr(self, 'canary_expected_hash') else ''
+        canary_rel_path = 'canary/check.txt'
+        repo = self._borg_repo()
+        env = self._borg_env()
+
+        # Letztes Archiv ermitteln
+        try:
+            result = _sp.run([BORG_BIN, 'list', '--lock-wait=15', '--last', '1', '--short', repo],
+                             capture_output=True, text=True, env=env, timeout=30)
+            if result.returncode != 0 or not result.stdout.strip():
+                self.config_data['canary_last_result'] = 'fail'
+                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                self._append_backup_log('[Canary] ❌ KEIN Archiv zum Prüfen gefunden\n')
+                return False
+            latest_archive = result.stdout.strip().split('\n')[0].strip()
+        except Exception as e:
+            self.config_data['canary_last_result'] = 'fail'
+            self._append_backup_log(f'[Canary] ❌ Archiv-Ermittlung fehlgeschlagen: {e}\n')
+            return False
+
+        # Canary aus Archiv extrahieren
+        try:
+            extract = _sp.run([BORG_BIN, 'extract', '--lock-wait=15', '--stdout',
+                               f'{repo}::{latest_archive}', canary_rel_path],
+                              capture_output=True, text=True, env=env, timeout=30)
+            if extract.returncode != 0:
+                self.config_data['canary_last_result'] = 'fail'
+                self._append_backup_log(f'[Canary] ❌ Extraktion fehlgeschlagen: {extract.stderr[:100]}\n')
+                return False
+            extracted_content = extract.stdout
+            # Hash aus extrahiertem Inhalt berechnen (ohne die SHA256-Zeile)
+            lines = extracted_content.strip().split('\n')
+            verify_lines = [l for l in lines if not l.startswith('SHA256:')]
+            verify_text = '\n'.join(verify_lines) + '\n'
+            actual_hash = hashlib.sha256(verify_text.encode()).hexdigest()
+            ist_ok = (actual_hash == expected_hash) if expected_hash else ('SHA256: ' in extracted_content)
+            self.config_data['canary_last_result'] = 'ok' if ist_ok else 'fail'
+            self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+            if ist_ok:
+                self._append_backup_log(f'[Canary] ✅ Integrität OK – Hash {actual_hash[:16]}... bestätigt\n')
+            else:
+                self._append_backup_log(f'[Canary] ❌ Integritaet NICHT OK!\n')
+                self._append_backup_log(f'  Erwartet: {expected_hash[:16]}...\n')
+                self._append_backup_log(f'  Erhalten: {actual_hash[:16]}...\n')
+            return ist_ok
+        except Exception as e:
+            self.config_data['canary_last_result'] = 'fail'
+            self._append_backup_log(f'[Canary] ❌ Verifikation fehlgeschlagen: {e}\n')
+            return False
     def _build_backup_tab(self):
         tab = self.tab_backup
         tab.columnconfigure(0, weight=1)
@@ -2732,6 +2815,14 @@ class BorgBackupGUI:
         self.backup_task_queue = []
         self.backup_current_task = None
 
+        # Canary-Check-Datei erstellen (vor dem Backup)
+        canary_enabled = self.config_data.get('canary_enabled', True)
+        if canary_enabled:
+            canary_path = self._create_canary_file()
+            # Canary-Verzeichnis automatisch zum Include hinzufuegen
+            if os.path.dirname(canary_path) not in includes:
+                includes.append(os.path.dirname(canary_path))
+
         create_cmd = [BORG_BIN, 'create', '-v', '--stats', '--progress', f'--compression={compression}', f'{repo}::{archive_name}']
         create_cmd.extend(includes)
         for ex in excludes:
@@ -2861,6 +2952,9 @@ class BorgBackupGUI:
 
         if exit_code in (0, 1) and not stopped and not exception_text:
             self.status_data['last_success_at'] = finished_at.isoformat(timespec='seconds')
+            # Canary-Check nach erfolgreichem Backup
+            if self.config_data.get('canary_enabled', True):
+                self.master.after(500, self._verify_canary)
             if exit_code == 1:
                 self.status_data['last_error'] = 'Backup mit Warnungen beendet.'
                 self._show_notice('Backup mit Warnungen beendet. Das Archiv wurde trotzdem erfolgreich geschrieben.', level='warning', timeout_ms=10000)

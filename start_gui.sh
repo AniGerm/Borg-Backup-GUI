@@ -2,16 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-APP="$SCRIPT_DIR/hetzner_borg_gui.py"
+APP="$SCRIPT_DIR/borg_backup_gui.py"
+APP_OLD="$SCRIPT_DIR/hetzner_borg_gui.py"
 VENV_DIR="$SCRIPT_DIR/.venv"
 VENV_PY="$VENV_DIR/bin/python"
 INIT_SCRIPT="$SCRIPT_DIR/install_desktop_launcher.sh"
-MARKER_FILE="$HOME/.config/hetzner-borg-gui/installed.marker"
+MARKER_DIR="$HOME/.config/borg-backup-gui"
+MARKER_FILE="$MARKER_DIR/installed.marker"
 NOPASSWD_SCRIPT="$SCRIPT_DIR/install_nopasswd_rule.sh"
-NOPASSWD_MARKER="$HOME/.config/hetzner-borg-gui/nopasswd.marker"
+NOPASSWD_MARKER="$MARKER_DIR/nopasswd.marker"
 
-if [[ ! -f "$APP" ]]; then
-    echo "[FEHLER] App-Datei nicht gefunden: $APP" >&2
+if [[ ! -f "$APP" ]] && [[ ! -f "$APP_OLD" ]]; then
+    echo "[FEHLER] App-Datei nicht gefunden." >&2
     exit 1
 fi
 
@@ -30,7 +32,7 @@ from tkinter import messagebox
 root = tk.Tk()
 root.withdraw()
 answer = messagebox.askyesno(
-    'Hetzner Borg GUI einrichten',
+    'Borg Backup GUI einrichten',
     'Die erste Einrichtung ist noch nicht vollstaendig abgeschlossen.\n\n'
     'Soll die fehlende Launcher-/Hintergrund-Konfiguration jetzt installiert werden?\n'
     'Danach startet die App automatisch neu.'
@@ -47,7 +49,7 @@ from tkinter import messagebox
 root = tk.Tk()
 root.withdraw()
 messagebox.showerror(
-    'Hetzner Borg GUI',
+    'Borg Backup GUI',
     'Die Installation des Launchers ist fehlgeschlagen oder wurde abgebrochen.\n\n'
     'Bitte pruefe die Fehlermeldung im Terminal oder starte das Installationsskript manuell.'
 )
@@ -64,7 +66,7 @@ from tkinter import messagebox
 root = tk.Tk()
 root.withdraw()
 messagebox.showerror(
-    'Hetzner Borg GUI',
+    'Borg Backup GUI',
     'Die Einrichtung fuer passwortfreie Backups ist fehlgeschlagen oder wurde abgebrochen.\n\n'
     'Bitte pruefe die Fehlermeldung im Terminal oder starte das NOPASSWD-Skript manuell.'
 )
@@ -78,22 +80,21 @@ PY
     fi
 fi
 
-# System-PyGObject (gi) dem venv-Python zugaenglich machen,
-# damit pystray das AppIndicator-Backend nutzt (Dropdown-Menue im Tray).
+# System-PyGObject fuer Tray-Zugriff
 SYS_DIST="/usr/lib/python3/dist-packages"
 if [[ -d "$SYS_DIST" ]]; then
     export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$SYS_DIST"
 fi
 
-# VS Code als Snap setzt GTK-Variablen auf Snap-interne Module/Pfade.
-# Das kann beim Tray-Start (pystray + GTK/AppIndicator) zu GLIBC-Konflikten fuehren.
-unset GTK_PATH
-unset GTK_EXE_PREFIX
-unset GTK_IM_MODULE_FILE
-unset GDK_PIXBUF_MODULE_FILE
-unset GTK_MODULES
+# VS Code Snap-Umgebungsvariablen entfernen (Konflikte mit GTK)
+unset GTK_PATH GTK_EXE_PREFIX GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE GTK_MODULES LD_LIBRARY_PATH
 
-# Optional gesetzte Snap-Library-Pfade verwerfen, damit Systembibliotheken genutzt werden.
-unset LD_LIBRARY_PATH
-
-exec "$VENV_PY" "$APP"
+# Neue App bevorzugen, alte als Fallback
+if [[ -f "$APP" ]]; then
+    exec "$VENV_PY" "$APP"
+elif [[ -f "$APP_OLD" ]]; then
+    exec "$VENV_PY" "$APP_OLD"
+else
+    echo "[FEHLER] Keine App-Datei gefunden." >&2
+    exit 1
+fi

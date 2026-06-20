@@ -22,8 +22,6 @@ fi
 
 # -------------------------------------------------------
 # Ab hier: Wir laufen als root (via pkexec).
-# PKEXEC_UID enthaelt die UID des aufrufenden Users.
-# $HOME waere hier /root – deshalb echten User bestimmen.
 # -------------------------------------------------------
 REAL_UID="${PKEXEC_UID:-${SUDO_UID:-}}"
 if [[ -z "$REAL_UID" ]]; then
@@ -33,9 +31,9 @@ fi
 
 CURRENT_USER="$(getent passwd "$REAL_UID" | cut -d: -f1)"
 REAL_HOME="$(getent passwd "$REAL_UID" | cut -d: -f6)"
-MARKER_DIR="$REAL_HOME/.config/hetzner-borg-gui"
+MARKER_DIR="$REAL_HOME/.config/borg-backup-gui"
 MARKER_FILE="$MARKER_DIR/nopasswd.marker"
-SUDOERS_FILE="/etc/sudoers.d/99-hetzner-borg-gui"
+SUDOERS_FILE="/etc/sudoers.d/99-borg-backup-gui"
 BORG_BIN="$(command -v borg || true)"
 
 if [[ -z "$BORG_BIN" ]]; then
@@ -43,11 +41,14 @@ if [[ -z "$BORG_BIN" ]]; then
     exit 1
 fi
 
+# Alte Sudoers-Regel entfernen (Falls noch von hetzner-borg-gui)
+rm -f "/etc/sudoers.d/99-hetzner-borg-gui"
+
 TMP_FILE="$(mktemp)"
 trap 'rm -f "$TMP_FILE"' EXIT
 
 cat > "$TMP_FILE" <<EOF
-Defaults!$BORG_BIN env_keep += "BORG_RSH BORG_PASSPHRASE BORG_RELOCATED_REPO_ACCESS_IS_OK BORG_CACHE_DIR"
+Defaults!$BORG_BIN env_keep += "BORG_RSH BORG_PASSPHRASE BORG_RELOCATED_REPO_ACCESS_IS_OK BORG_CACHE_DIR AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_ENDPOINT_URL AWS_DEFAULT_REGION"
 $CURRENT_USER ALL=(root) NOPASSWD: SETENV: $BORG_BIN
 EOF
 
@@ -59,3 +60,4 @@ date -u +%FT%TZ > "$MARKER_FILE"
 
 echo "[OK] NOPASSWD-Regel installiert: $SUDOERS_FILE"
 echo "[OK] Installationsmarker geschrieben: $MARKER_FILE"
+echo "[HINWEIS] AWS_*-Umgebungsvariablen wurden zur env_keep-Liste hinzugefügt (S3-Unterstützung)."

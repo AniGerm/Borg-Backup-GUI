@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Hetzner Borg GUI
+Comment=Backup und Restore mit Borg und Hetzner Storage Box
+Exec=/home/max/Dokumente/Programme/Hetzner_Backup_and_Restore/start_gui.sh
+Icon=/home/max/.local/share/icons/hicolor/scalable/apps/hetzner-borg-gui.svg
+Terminal=false
+Categories=Utility;
+Keywords=backup;borg;hetzner;restore;
+StartupNotify=true
+StartupWMClass=HetznerBorgGUI

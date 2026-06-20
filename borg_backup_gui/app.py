@@ -871,11 +871,8 @@ class MainWindow:
     # ============================================================
 
     def _on_close(self):
-        tray_enabled = bool(self.config.global_settings.get('tray_enabled', True))
-        if self.tray and self.tray.tray_runtime_available and tray_enabled:
-            self.save_config()
-            self._hide_window_to_tray()
-            return
+        """Fenster schließen = App beenden (kein Verstecken im Tray mehr)."""
+        self.save_config()
         self._quit_app()
 
     def _show_window(self):

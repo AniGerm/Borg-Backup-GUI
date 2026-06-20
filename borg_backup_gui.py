@@ -2672,10 +2672,15 @@ class BorgBackupGUI:
             self.master.after_cancel(self.scheduled_job_id)
             self.scheduled_job_id = None
 
-        if getattr(self, 'schedule_type_var', None) is None:
-            return
-
-        mode = self.schedule_type_var.get()
+        # Fallback: wenn schedule_type_var nicht existiert, aus config_data lesen
+        mode = 'manual'
+        if getattr(self, 'schedule_type_var', None) is not None:
+            mode = self.schedule_type_var.get()
+        if mode == 'manual':
+            # Evtl. hat das Profil einen aktiven Zeitplan, der nicht in der UI ist
+            mode = self.config_data.get('schedule_type', 'manual')
+            if mode != 'manual' and hasattr(self, 'schedule_type_var'):
+                self.schedule_type_var.set(mode)
         if mode == 'manual':
             self.next_backup_dt = None
             return
@@ -2690,7 +2695,9 @@ class BorgBackupGUI:
         last_run = self._parse_iso_time(last_run_str)
 
         if mode == 'daily':
-            raw_time = self.schedule_time_var.get().strip()
+            raw_time = self.config_data.get('schedule_time', '03:15').strip()
+            if hasattr(self, 'schedule_time_var') and self.schedule_time_var.get().strip():
+                raw_time = self.schedule_time_var.get().strip()
             try:
                 hour, minute = [int(x) for x in raw_time.split(':', 1)]
                 candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)

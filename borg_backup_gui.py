@@ -1288,7 +1288,7 @@ class BorgBackupGUI:
         self.ssh_key_var = tk.StringVar(value=self.config_data.get('ssh_key', ''))
         if not self.ssh_key_var.get() and default_ssh_keys:
             self.ssh_key_var.set(default_ssh_keys[0])
-        ssh_entry = ttk.Combobox(self.ssh_fields_frame, textvariable=self.ssh_key_var, values=default_ssh_keys, width=47)
+        ssh_entry = ttk.Combobox(self.ssh_fields_frame, textvariable=self.ssh_key_var, values=default_ssh_keys, width=32)
         ssh_entry.grid(row=1, column=1, sticky='ew', padx=5, pady=2)
         ttk.Button(self.ssh_fields_frame, text='Auswählen', command=self._select_ssh_key).grid(row=1, column=2, padx=5, pady=2)
 
@@ -1311,7 +1311,7 @@ class BorgBackupGUI:
         # === Lokale Felder (sichtbar bei Typ local) ===
         self.local_fields_frame = ttk.Frame(server_frame)
         self.local_fields_frame.grid(row=2, column=0, columnspan=3, sticky='ew')
-        ttk.Label(self.local_fields_frame, text='Speicherpfad (Ordner):').grid(row=0, column=0, sticky='e', padx=5, pady=2)
+        ttk.Label(self.local_fields_frame, text='Ordner:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.local_path_var = tk.StringVar(value=self.config_data.get('local_path', ''))
         ttk.Entry(self.local_fields_frame, textvariable=self.local_path_var, width=35).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
         ttk.Button(self.local_fields_frame, text='Wählen', command=self._select_local_path).grid(row=0, column=2, padx=5, pady=2)

@@ -123,7 +123,8 @@ class DashboardTab:
         ttk.Label(tray_frame, text='Hinweis: Schließen des Fensters beendet die App (kein Minimieren in den Tray mehr).',
                   font=('Arial', 9)).grid(row=1, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 8))
 
-        tray_supported = bool(self.app.tray and self.app.tray.tray_supported)
+        app_tray = getattr(self.app, 'tray', None)
+        tray_supported = bool(app_tray and app_tray.tray_supported)
         if not tray_supported:
             tray_check.state(['disabled'])
             tray_style_combo.state(['disabled'])
@@ -161,8 +162,9 @@ class DashboardTab:
         self.app.config.global_settings['tray_enabled'] = bool(self.tray_enabled_var.get())
         self.app.config.global_settings['tray_icon_style'] = self.tray_icon_style_var.get().strip() or 'disk'
         self.app.config.save()
-        if self.app.tray:
-            self.app.tray.setup(force_restart=True)
+        app_tray = getattr(self.app, 'tray', None)
+        if app_tray:
+            app_tray.setup(force_restart=True)
 
     def refresh_profile_list(self):
         profiles = self.app.config.get_profiles()

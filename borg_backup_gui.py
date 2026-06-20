@@ -649,6 +649,11 @@ class BorgBackupGUI:
             row=3, column=1, sticky='w', padx=6, pady=(2, 8)
         )
 
+        self.canary_status_var = tk.StringVar(value='Canary: noch kein Check')
+        ttk.Label(status_frame, textvariable=self.canary_status_var, font=('Arial', 9)).grid(
+            row=4, column=1, sticky='w', padx=6, pady=(0, 6)
+        )
+
         action_frame = ttk.LabelFrame(tab, text='Schnellaktionen')
         action_frame.grid(row=2, column=0, sticky='ew', padx=12, pady=8)
         ttk.Button(action_frame, text='Backup jetzt starten', command=self._start_backup).pack(side='left', padx=8, pady=8)
@@ -2786,6 +2791,17 @@ class BorgBackupGUI:
                 self.last_error_var.set('Letzte Meldung: Erfolgreich')
         else:
             self.last_error_var.set('Letzte Meldung: noch keine')
+
+        # Canary-Status aktualisieren
+        if hasattr(self, 'canary_status_var'):
+            canary_result = self.config_data.get('canary_last_result', '')
+            canary_check = self.config_data.get('canary_last_check', '')
+            if canary_result == 'ok':
+                self.canary_status_var.set(f'✅ Canary: OK ({canary_check[:16]})')
+            elif canary_result == 'fail':
+                self.canary_status_var.set(f'❌ Canary: FEHLER ({canary_check[:16]})')
+            else:
+                self.canary_status_var.set('⏳ Canary: noch kein Check')
 
         self._restore_stats_from_status()
 

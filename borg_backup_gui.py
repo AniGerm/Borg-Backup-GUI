@@ -1273,6 +1273,7 @@ class BorgBackupGUI:
         # === SSH-Felder (sichtbar bei Typ ssh) ===
         self.ssh_fields_frame = ttk.Frame(server_frame)
         self.ssh_fields_frame.grid(row=0, column=0, columnspan=3, sticky='ew')
+        self.ssh_fields_frame.columnconfigure(1, weight=1)
 
         ttk.Label(self.ssh_fields_frame, text='Borg Repository URL:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.storage_var = tk.StringVar(value=self.config_data.get('storage', DEFAULT_STORAGE))
@@ -1295,6 +1296,7 @@ class BorgBackupGUI:
         # === S3-Felder (sichtbar bei Typ s3) ===
         self.s3_fields_frame = ttk.Frame(server_frame)
         self.s3_fields_frame.grid(row=1, column=0, columnspan=3, sticky='ew')
+        self.s3_fields_frame.columnconfigure(1, weight=1)
         ttk.Label(self.s3_fields_frame, text='Bucket Name:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.s3_storage_var = tk.StringVar(value=self.config_data.get('storage', ''))
         ttk.Entry(self.s3_fields_frame, textvariable=self.s3_storage_var, width=35).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
@@ -1311,6 +1313,7 @@ class BorgBackupGUI:
         # === Lokale Felder (sichtbar bei Typ local) ===
         self.local_fields_frame = ttk.Frame(server_frame)
         self.local_fields_frame.grid(row=2, column=0, columnspan=3, sticky='ew')
+        self.local_fields_frame.columnconfigure(1, weight=1)
         ttk.Label(self.local_fields_frame, text='Ordner:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.local_path_var = tk.StringVar(value=self.config_data.get('local_path', ''))
         ttk.Entry(self.local_fields_frame, textvariable=self.local_path_var, width=35).grid(row=0, column=1, sticky='ew', padx=5, pady=2)
@@ -1319,6 +1322,7 @@ class BorgBackupGUI:
         # === Gemeinsame Felder ===
         common_frame = ttk.Frame(server_frame)
         common_frame.grid(row=3, column=0, columnspan=3, sticky='ew')
+        common_frame.columnconfigure(1, weight=1)
 
         ttk.Label(common_frame, text='Passphrase:').grid(row=0, column=0, sticky='e', padx=5, pady=2)
         self.passphrase_var = tk.StringVar(value=self.config_data.get('borg_passphrase', ''))

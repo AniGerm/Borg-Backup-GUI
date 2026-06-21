@@ -58,8 +58,7 @@ DEFAULT_STORAGE = 'uXXXXXX@uXXXXXX.your-storagebox.de:./backup'
 BORG_BIN = shutil.which('borg') or 'borg'
 INSTANCE_LOCK_HANDLE = None
 
-CANARY_DIR = CONFIG_DIR / 'canary'
-CANARY_FILE = CANARY_DIR / 'check.txt'
+CANARY_FILE = '/tmp/borg-canary-check.txt'
 
 # Alte Config-Pfade (für Migration)
 OLD_CONFIG_DIR = Path.home() / '.config' / 'hetzner-borg-gui'
@@ -1253,7 +1252,6 @@ class BorgBackupGUI:
     def _create_canary_file(self):
         """Erstellt Canary-Datei mit bekanntem Inhalt vor dem Backup."""
         import hashlib
-        CANARY_DIR.mkdir(parents=True, exist_ok=True)
         profile_name = self.config_data.get('profile_name', 'Standard')
         timestamp = datetime.datetime.now().isoformat(timespec='seconds')
         content_lines = [
@@ -1265,7 +1263,7 @@ class BorgBackupGUI:
         expected_hash = hashlib.sha256(content_text.encode()).hexdigest()
         content_lines.append(f'SHA256: {expected_hash}')
         final_text = '\n'.join(content_lines) + '\n'
-        CANARY_FILE.write_text(final_text)
+        with open(CANARY_FILE, "w") as cf: cf.write(final_text)
         self.canary_expected_hash = expected_hash
         self.canary_profile_name = profile_name
         self._append_backup_log(f'\n[Canary] Check-Datei erstellt: {CANARY_FILE}\n')
@@ -1278,7 +1276,7 @@ class BorgBackupGUI:
         import subprocess as _sp
         profile_name = self.canary_profile_name if hasattr(self, 'canary_profile_name') else self.config_data.get('profile_name', 'Standard')
         expected_hash = self.canary_expected_hash if hasattr(self, 'canary_expected_hash') else ''
-        canary_rel_path = 'canary/check.txt'
+        canary_rel_path = CANARY_FILE
         repo = self._borg_repo()
         env = self._borg_env()
 
@@ -2843,8 +2841,8 @@ class BorgBackupGUI:
         if canary_enabled:
             canary_path = self._create_canary_file()
             # Canary-Verzeichnis automatisch zum Include hinzufuegen
-            if os.path.dirname(canary_path) not in includes:
-                includes.append(os.path.dirname(canary_path))
+            if canary_path not in includes:
+                includes.append(canary_path)
 
         create_cmd = [BORG_BIN, 'create', '-v', '--stats', '--progress', f'--compression={compression}', f'{repo}::{archive_name}']
         create_cmd.extend(includes)

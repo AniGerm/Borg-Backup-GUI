@@ -3,6 +3,7 @@
 Borg Backup GUI - Komplettes Backup-Management mit Borg und Storage Box (SSH).
 Funktioniert als root für vollständige Systemsicherungen.
 """
+__version__ = '1.1.0'
 
 import datetime
 import fcntl
@@ -1295,19 +1296,47 @@ class BorgBackupGUI:
             self._append_backup_log(f'[Canary] ❌ Archiv-Ermittlung fehlgeschlagen: {e}\n')
             return False
 
-        # Canary: Prüfen ob die Datei im Archiv existiert
+        # Canary: Datei aus dem Archiv extrahieren und SHA256-Hash verifizieren
         try:
-            check = _sp.run([BORG_BIN, 'list', '--lock-wait=15', f'{repo}::{latest_archive}', canary_rel_path],
-                            capture_output=True, text=True, env=env, timeout=60)
-            if check.returncode == 0 and canary_rel_path.replace('/', '') in check.stdout.replace('/', ''):
+            extract = _sp.run([BORG_BIN, 'extract', '--stdout', '--lock-wait=15', f'{repo}::{latest_archive}', canary_rel_path],
+                              capture_output=True, text=True, env=env, timeout=60)
+            if extract.returncode != 0 or not extract.stdout.strip():
+                self.config_data['canary_last_result'] = 'fail'
+                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                self._append_backup_log(f'[Canary] ❌ Datei NICHT im Archiv: {canary_rel_path}\n')
+                return False
+
+            # Aus extrahiertem Inhalt den gespeicherten SHA256-Hash ermitteln
+            content_lines = extract.stdout.strip().split('\n')
+            sha_line = None
+            data_lines = []
+            for line in content_lines:
+                if line.startswith('SHA256:'):
+                    sha_line = line
+                else:
+                    data_lines.append(line)
+
+            if sha_line is None:
+                self.config_data['canary_last_result'] = 'fail'
+                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                self._append_backup_log(f'[Canary] ❌ Kein SHA256-Eintrag in extrahierter Datei\n')
+                return False
+
+            stored_hash = sha_line.split('SHA256:', 1)[1].strip()
+
+            # Hash des Daten-Teils neu berechnen
+            data_text = '\n'.join(data_lines) + '\n'
+            computed_hash = hashlib.sha256(data_text.encode()).hexdigest()
+
+            if computed_hash == stored_hash:
                 self.config_data['canary_last_result'] = 'ok'
                 self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log(f'[Canary] ✅ Datei im Archiv gefunden: {canary_rel_path}\n')
+                self._append_backup_log(f'[Canary] ✅ Integrität bestätigt – Hash {stored_hash[:16]}...\n')
                 return True
             else:
                 self.config_data['canary_last_result'] = 'fail'
                 self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log(f'[Canary] ❌ Datei NICHT im Archiv: {canary_rel_path}\n')
+                self._append_backup_log(f'[Canary] ❌ Hash-Fehler – erwartet {expected_hash[:16]}... != extrahiert {stored_hash[:16]}...\n')
                 return False
         except Exception as e:
             self.config_data['canary_last_result'] = 'fail'
@@ -2833,7 +2862,13 @@ class BorgBackupGUI:
             if canary_path not in includes:
                 includes.append(canary_path)
 
-        create_cmd = [BORG_BIN, 'create', '--lock-wait=30', '-v', '--stats', '--progress', f'--compression={compression}', f'{repo}::{archive_name}']
+        create_cmd = [BORG_BIN, 'create', '--lock-wait=30', '-v', '--stats', '--progress', f'--compression={compression}']
+
+        # Canary-Datei per --pattern explizit einschliessen (MUSS vor ARCHIVE stehen!)
+        if canary_enabled:
+            create_cmd.extend(['--pattern', f'+{CANARY_FILE.lstrip("/")}'])
+
+        create_cmd.append(f'{repo}::{archive_name}')
         create_cmd.extend(includes)
         for ex in excludes:
             create_cmd.extend(['--exclude', ex])

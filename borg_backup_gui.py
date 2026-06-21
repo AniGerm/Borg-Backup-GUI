@@ -2833,7 +2833,7 @@ class BorgBackupGUI:
             if canary_path not in includes:
                 includes.append(canary_path)
 
-        create_cmd = [BORG_BIN, 'create', '-v', '--stats', '--progress', f'--compression={compression}', f'{repo}::{archive_name}']
+        create_cmd = [BORG_BIN, 'create', '--lock-wait=30', '-v', '--stats', '--progress', f'--compression={compression}', f'{repo}::{archive_name}']
         create_cmd.extend(includes)
         for ex in excludes:
             create_cmd.extend(['--exclude', ex])

@@ -1634,12 +1634,16 @@ class BorgBackupGUI:
         btn_frame = ttk.Frame(tab)
         btn_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=12, pady=8)
 
-        self.protocol_btn = ttk.Button(btn_frame, text='PDF-Protokoll erstellen', command=self._generate_pdf_report)
+        self.protocol_btn = ttk.Button(btn_frame, text='PDF-Protokoll jetzt erstellen', command=self._generate_pdf_report)
         self.protocol_btn.pack(side='left', padx=5)
 
         self.protocol_open_btn = ttk.Button(
             btn_frame, text='Zuletzt erstelltes öffnen', command=self._open_last_protocol, state='disabled')
         self.protocol_open_btn.pack(side='left', padx=5)
+
+        self.protocol_auto_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(btn_frame, text='Auto nach Backup', variable=self.protocol_auto_var).pack(
+            side='left', padx=(15, 5))
 
         self.protocol_status_var = tk.StringVar(value='')
         ttk.Label(btn_frame, textvariable=self.protocol_status_var, font=('Arial', 9)).pack(side='left', padx=10)
@@ -1686,23 +1690,35 @@ class BorgBackupGUI:
         self.protocol_preview.see(tk.END)
         self.protocol_preview.configure(state='disabled')
 
-    def _generate_pdf_report(self):
-        """Erstellt ein DSGVO-konformes PDF-Protokoll mit allen Backup-Daten."""
+    def _generate_pdf_report(self, auto_generated=False):
+        """Erstellt ein DSGVO-konformes PDF-Protokoll mit allen Backup-Daten.
+        
+        Args:
+            auto_generated: True = automatisch nach Backup (keine Popups)
+        """
+        # Sofort Log in Vorschau schreiben – immer sichtbar
+        mode_str = 'Auto' if auto_generated else 'Manuell'
+        self._append_protocol_preview(f'\n[{mode_str}] PDF-Protokoll wird erstellt...\n')
+
         if FPDF is None:
-            messagebox.showerror('Fehler', 'fpdf2 ist nicht installiert.\nBitte "pip install fpdf2" ausführen.')
+            msg = 'fpdf2 ist nicht installiert.\nBitte "pip install fpdf2" ausführen.'
+            self._append_protocol_preview(f'[FEHLER] {msg}\n')
+            if not auto_generated:
+                messagebox.showerror('Fehler', msg)
             return
 
-        company = self.protocol_company_var.get().strip()
-        server = self.protocol_server_var.get().strip()
-        info = self.protocol_info_var.get().strip()
+        company = self.protocol_company_var.get().strip() if hasattr(self, 'protocol_company_var') else ''
+        server = self.protocol_server_var.get().strip() if hasattr(self, 'protocol_server_var') else ''
+        info = self.protocol_info_var.get().strip() if hasattr(self, 'protocol_info_var') else ''
         hostname = os.uname().nodename
 
+        # Fallback wenn Felder leer sind
         if not company:
-            messagebox.showerror('Fehler', 'Bitte einen Firmennamen (Auftraggeber) eingeben.')
-            return
+            company = f'Unbekannter Auftraggeber ({hostname})'
+            if not auto_generated:
+                self._append_protocol_preview('[HINWEIS] Firmenname nicht gesetzt – verwende Platzhalter\n')
         if not server:
-            messagebox.showerror('Fehler', 'Bitte einen Servernamen (Mandant) eingeben.')
-            return
+            server = hostname
 
         now = datetime.datetime.now()
         timestamp_str = now.strftime('%d.%m.%Y %H:%M:%S')
@@ -1727,7 +1743,6 @@ class BorgBackupGUI:
         compression = self.config_data.get('compression', 'lz4')
 
         try:
-            from fpdf import FPDF
             pdf = FPDF(orientation='P', unit='mm', format='A4')
             pdf.set_auto_page_break(auto=True, margin=20)
             pdf.add_page()
@@ -1890,8 +1905,7 @@ class BorgBackupGUI:
             self._save_config()
 
             # Vorschau aktualisieren
-            self._append_protocol_preview(
-                f'\n>>> PDF-Protokoll erstellt: {pdf_path}\n')
+            self._append_protocol_preview(f'    PDF gespeichert: {os.path.basename(pdf_path)}\n')
             self._append_protocol_preview(f'    Auftraggeber: {company}\n')
             self._append_protocol_preview(f'    Mandant:      {server}\n')
             self._append_protocol_preview(f'    Canary:       {canary_icon} {canary_status}\n')
@@ -1899,14 +1913,18 @@ class BorgBackupGUI:
             self._append_protocol_preview(f'    Dateien: {last_files} | Quelle {last_source}\n')
             if info:
                 self._append_protocol_preview(f'    Infotext: {info}\n')
+            self._append_protocol_preview(f'[OK] PDF-Protokoll erstellt ({mode_str})\n')
 
             self.protocol_status_var.set(f'PDF gespeichert: {pdf_path}')
             self.protocol_open_btn.config(state='normal')
-            self._show_notice('PDF-Protokoll erfolgreich erstellt.', level='success')
+            if not auto_generated:
+                self._show_notice('PDF-Protokoll erfolgreich erstellt.', level='success')
 
         except Exception as exc:
-            messagebox.showerror('Fehler', f'PDF-Erstellung fehlgeschlagen:\n{exc}')
-            self._append_protocol_preview(f'\n[FEHLER] PDF-Erstellung fehlgeschlagen: {exc}\n')
+            err_msg = f'PDF-Erstellung fehlgeschlagen: {exc}'
+            self._append_protocol_preview(f'[FEHLER] {err_msg}\n')
+            if not auto_generated:
+                messagebox.showerror('Fehler', err_msg)
 
     def _append_backup_log(self, text):
         self.log_queue.put(('backup', text))
@@ -3332,6 +3350,10 @@ class BorgBackupGUI:
             # Canary-Check nach erfolgreichem Backup
             if self.config_data.get('canary_enabled', True):
                 self.master.after(500, self._verify_canary)
+            # Auto-PDF-Protokoll (nach Canary-Check, mit 3s Verzoegerung)
+            auto_pdf = getattr(self, 'protocol_auto_var', None)
+            if auto_pdf is not None and auto_pdf.get():
+                self.master.after(4000, lambda: self._generate_pdf_report(auto_generated=True))
             if exit_code == 1:
                 self.status_data['last_error'] = 'Backup mit Warnungen beendet.'
                 self._show_notice('Backup mit Warnungen beendet. Das Archiv wurde trotzdem erfolgreich geschrieben.', level='warning', timeout_ms=10000)

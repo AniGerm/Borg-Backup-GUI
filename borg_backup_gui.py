@@ -1159,7 +1159,7 @@ class BorgBackupGUI:
             import subprocess as _sp
             try:
                 result = _sp.run([BORG_BIN, 'list', '--lock-wait=15', repo, '--json'],
-                                 capture_output=True, text=True, env=env, timeout=30)
+                                 capture_output=True, text=True, env=env, timeout=60)
                 if result.returncode == 0:
                     import json as _json
                     data = _json.loads(result.stdout)
@@ -1276,14 +1276,14 @@ class BorgBackupGUI:
         import subprocess as _sp
         profile_name = self.canary_profile_name if hasattr(self, 'canary_profile_name') else self.config_data.get('profile_name', 'Standard')
         expected_hash = self.canary_expected_hash if hasattr(self, 'canary_expected_hash') else ''
-        canary_rel_path = CANARY_FILE
+        canary_rel_path = 'tmp/borg-canary-check.txt'
         repo = self._borg_repo()
         env = self._borg_env()
 
         # Letztes Archiv ermitteln
         try:
             result = _sp.run([BORG_BIN, 'list', '--lock-wait=15', '--last', '1', '--short', repo],
-                             capture_output=True, text=True, env=env, timeout=30)
+                             capture_output=True, text=True, env=env, timeout=60)
             if result.returncode != 0 or not result.stdout.strip():
                 self.config_data['canary_last_result'] = 'fail'
                 self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
@@ -1299,7 +1299,7 @@ class BorgBackupGUI:
         try:
             extract = _sp.run([BORG_BIN, 'extract', '--lock-wait=15', '--stdout',
                                f'{repo}::{latest_archive}', canary_rel_path],
-                              capture_output=True, text=True, env=env, timeout=30)
+                              capture_output=True, text=True, env=env, timeout=60)
             if extract.returncode != 0:
                 self.config_data['canary_last_result'] = 'fail'
                 self._append_backup_log(f'[Canary] ❌ Extraktion fehlgeschlagen: {extract.stderr[:100]}\n')

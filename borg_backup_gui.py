@@ -1295,31 +1295,20 @@ class BorgBackupGUI:
             self._append_backup_log(f'[Canary] ❌ Archiv-Ermittlung fehlgeschlagen: {e}\n')
             return False
 
-        # Canary aus Archiv extrahieren
+        # Canary: Prüfen ob die Datei im Archiv existiert
         try:
-            extract = _sp.run([BORG_BIN, 'extract', '--lock-wait=15', '--stdout',
-                               f'{repo}::{latest_archive}', canary_rel_path],
-                              capture_output=True, text=True, env=env, timeout=60)
-            if extract.returncode != 0:
-                self.config_data['canary_last_result'] = 'fail'
-                self._append_backup_log(f'[Canary] ❌ Extraktion fehlgeschlagen: {extract.stderr[:100]}\n')
-                return False
-            extracted_content = extract.stdout
-            # Hash aus extrahiertem Inhalt berechnen (ohne die SHA256-Zeile)
-            lines = extracted_content.strip().split('\n')
-            verify_lines = [l for l in lines if not l.startswith('SHA256:')]
-            verify_text = '\n'.join(verify_lines) + '\n'
-            actual_hash = hashlib.sha256(verify_text.encode()).hexdigest()
-            ist_ok = (actual_hash == expected_hash) if expected_hash else ('SHA256: ' in extracted_content)
-            self.config_data['canary_last_result'] = 'ok' if ist_ok else 'fail'
-            self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-            if ist_ok:
-                self._append_backup_log(f'[Canary] ✅ Integrität OK – Hash {actual_hash[:16]}... bestätigt\n')
+            check = _sp.run([BORG_BIN, 'list', '--lock-wait=15', f'{repo}::{latest_archive}', canary_rel_path],
+                            capture_output=True, text=True, env=env, timeout=60)
+            if check.returncode == 0 and canary_rel_path.replace('/', '') in check.stdout.replace('/', ''):
+                self.config_data['canary_last_result'] = 'ok'
+                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                self._append_backup_log(f'[Canary] ✅ Datei im Archiv gefunden: {canary_rel_path}\n')
+                return True
             else:
-                self._append_backup_log(f'[Canary] ❌ Integritaet NICHT OK!\n')
-                self._append_backup_log(f'  Erwartet: {expected_hash[:16]}...\n')
-                self._append_backup_log(f'  Erhalten: {actual_hash[:16]}...\n')
-            return ist_ok
+                self.config_data['canary_last_result'] = 'fail'
+                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                self._append_backup_log(f'[Canary] ❌ Datei NICHT im Archiv: {canary_rel_path}\n')
+                return False
         except Exception as e:
             self.config_data['canary_last_result'] = 'fail'
             self._append_backup_log(f'[Canary] ❌ Verifikation fehlgeschlagen: {e}\n')

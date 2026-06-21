@@ -58,7 +58,7 @@ DEFAULT_STORAGE = 'uXXXXXX@uXXXXXX.your-storagebox.de:./backup'
 BORG_BIN = shutil.which('borg') or 'borg'
 INSTANCE_LOCK_HANDLE = None
 
-CANARY_FILE = '/tmp/borg-canary-check.txt'
+CANARY_FILE = '/var/tmp/borg-canary-check.txt'
 
 # Alte Config-Pfade (für Migration)
 OLD_CONFIG_DIR = Path.home() / '.config' / 'hetzner-borg-gui'

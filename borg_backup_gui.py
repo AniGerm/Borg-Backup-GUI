@@ -1276,7 +1276,7 @@ class BorgBackupGUI:
         import subprocess as _sp
         profile_name = self.canary_profile_name if hasattr(self, 'canary_profile_name') else self.config_data.get('profile_name', 'Standard')
         expected_hash = self.canary_expected_hash if hasattr(self, 'canary_expected_hash') else ''
-        canary_rel_path = 'tmp/borg-canary-check.txt'
+        canary_rel_path = 'var/tmp/borg-canary-check.txt'
         repo = self._borg_repo()
         env = self._borg_env()
 

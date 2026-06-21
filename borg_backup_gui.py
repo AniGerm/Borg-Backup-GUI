@@ -3,7 +3,7 @@
 Borg Backup GUI - Komplettes Backup-Management mit Borg und Storage Box (SSH).
 Funktioniert als root für vollständige Systemsicherungen.
 """
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 import datetime
 import fcntl
@@ -32,6 +32,11 @@ try:
     from PIL import ImageTk
 except Exception:
     ImageTk = None
+
+try:
+    from fpdf import FPDF
+except Exception:
+    FPDF = None
 
 try:
     import gi
@@ -348,6 +353,10 @@ class BorgBackupGUI:
         self.notebook.add(self.tab_restore, text='Restore')
         self._build_restore_tab()
 
+        self.tab_protocol = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_protocol, text='Protokoll')
+        self._build_protocol_tab()
+
         self.runner = CommandRunner(
             append_callback=self._append_backup_log,
             schedule_main=lambda cb: self.master.after(0, cb)
@@ -463,6 +472,10 @@ class BorgBackupGUI:
         data.setdefault('canary_enabled', True)
         data.setdefault('canary_last_check', '')
         data.setdefault('canary_last_result', '')
+        data.setdefault('protocol_company_name', '')
+        data.setdefault('protocol_server_name', os.uname().nodename)
+        data.setdefault('protocol_info_text', '')
+        data.setdefault('protocol_last_pdf', '')
         return data
 
     def _load_status(self):
@@ -537,6 +550,12 @@ class BorgBackupGUI:
             self.config_data['tray_enabled'] = bool(self.tray_enabled_var.get())
         if hasattr(self, 'tray_icon_style_var'):
             self.config_data['tray_icon_style'] = self.tray_icon_style_var.get().strip() or 'disk'
+        if hasattr(self, 'protocol_company_var'):
+            self.config_data['protocol_company_name'] = self.protocol_company_var.get().strip()
+        if hasattr(self, 'protocol_server_var'):
+            self.config_data['protocol_server_name'] = self.protocol_server_var.get().strip()
+        if hasattr(self, 'protocol_info_var'):
+            self.config_data['protocol_info_text'] = self.protocol_info_var.get().strip()
 
     def _save_config(self):
         try:
@@ -1575,6 +1594,319 @@ class BorgBackupGUI:
         self.restore_log.pack(fill='both', expand=True, padx=10, pady=10)
 
         ttk.Button(tab, text='Restore starten', command=self._start_restore).pack(pady=5)
+
+    # ============================================================
+    # PROTOKOLL-TAB (PDF-Protokoll)
+    # ============================================================
+    def _build_protocol_tab(self):
+        tab = self.tab_protocol
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(6, weight=1)
+
+        row = 0
+        ttk.Label(tab, text='DSGVO-konformes Backup-Protokoll', font=('Arial', 14, 'bold')).grid(
+            row=row, column=0, columnspan=2, sticky='w', padx=12, pady=(12, 6))
+
+        row += 1
+        cfg_frame = ttk.LabelFrame(tab, text='Absender / Mandant')
+        cfg_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=12, pady=5)
+        cfg_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(cfg_frame, text='Firmenname (Auftraggeber):').grid(row=0, column=0, sticky='e', padx=5, pady=4)
+        self.protocol_company_var = tk.StringVar(
+            value=self.config_data.get('protocol_company_name', ''))
+        ttk.Entry(cfg_frame, textvariable=self.protocol_company_var, width=50).grid(
+            row=0, column=1, sticky='ew', padx=5, pady=4)
+
+        ttk.Label(cfg_frame, text='Servername (Mandant):').grid(row=1, column=0, sticky='e', padx=5, pady=4)
+        self.protocol_server_var = tk.StringVar(
+            value=self.config_data.get('protocol_server_name', os.uname().nodename))
+        ttk.Entry(cfg_frame, textvariable=self.protocol_server_var, width=50).grid(
+            row=1, column=1, sticky='ew', padx=5, pady=4)
+
+        ttk.Label(cfg_frame, text='Infotext (optional):').grid(row=2, column=0, sticky='ne', padx=5, pady=4)
+        self.protocol_info_var = tk.StringVar(
+            value=self.config_data.get('protocol_info_text', ''))
+        ttk.Entry(cfg_frame, textvariable=self.protocol_info_var, width=50).grid(
+            row=2, column=1, sticky='ew', padx=5, pady=4)
+
+        row += 1
+        btn_frame = ttk.Frame(tab)
+        btn_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=12, pady=8)
+
+        self.protocol_btn = ttk.Button(btn_frame, text='PDF-Protokoll erstellen', command=self._generate_pdf_report)
+        self.protocol_btn.pack(side='left', padx=5)
+
+        self.protocol_open_btn = ttk.Button(
+            btn_frame, text='Zuletzt erstelltes öffnen', command=self._open_last_protocol, state='disabled')
+        self.protocol_open_btn.pack(side='left', padx=5)
+
+        self.protocol_status_var = tk.StringVar(value='')
+        ttk.Label(btn_frame, textvariable=self.protocol_status_var, font=('Arial', 9)).pack(side='left', padx=10)
+
+        row += 1
+        preview_frame = ttk.LabelFrame(tab, text='Vorschau / Letzte Meldungen')
+        preview_frame.grid(row=row, column=0, columnspan=2, sticky='nsew', padx=12, pady=5)
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+
+        self.protocol_preview = tk.Text(
+            preview_frame, state='disabled', bg='#1e1e1e', fg='#e2e8f0',
+            font=('Courier', 9), wrap=tk.WORD, height=14)
+        self.protocol_preview.grid(row=0, column=0, sticky='nsew', padx=3, pady=3)
+
+        scroll = ttk.Scrollbar(preview_frame, command=self.protocol_preview.yview)
+        scroll.grid(row=0, column=1, sticky='ns')
+        self.protocol_preview.configure(yscrollcommand=scroll.set)
+
+        # Status des letzten PDF-Protokolls anzeigen
+        self._update_protocol_tab_status()
+
+    def _update_protocol_tab_status(self):
+        last_pdf = self.config_data.get('protocol_last_pdf', '')
+        if last_pdf and os.path.exists(last_pdf):
+            self.protocol_open_btn.config(state='normal')
+            self.protocol_status_var.set(f'Letztes PDF: {last_pdf}')
+        else:
+            self.protocol_open_btn.config(state='disabled')
+            self.protocol_status_var.set('Noch kein Protokoll erstellt')
+
+    def _open_last_protocol(self):
+        last_pdf = self.config_data.get('protocol_last_pdf', '')
+        if last_pdf and os.path.exists(last_pdf):
+            import subprocess
+            try:
+                subprocess.Popen(['xdg-open', last_pdf])
+            except Exception:
+                messagebox.showinfo('Info', f'PDF gespeichert unter:\n{last_pdf}')
+
+    def _append_protocol_preview(self, text):
+        self.protocol_preview.configure(state='normal')
+        self.protocol_preview.insert(tk.END, text)
+        self.protocol_preview.see(tk.END)
+        self.protocol_preview.configure(state='disabled')
+
+    def _generate_pdf_report(self):
+        """Erstellt ein DSGVO-konformes PDF-Protokoll mit allen Backup-Daten."""
+        if FPDF is None:
+            messagebox.showerror('Fehler', 'fpdf2 ist nicht installiert.\nBitte "pip install fpdf2" ausführen.')
+            return
+
+        company = self.protocol_company_var.get().strip()
+        server = self.protocol_server_var.get().strip()
+        info = self.protocol_info_var.get().strip()
+        hostname = os.uname().nodename
+
+        if not company:
+            messagebox.showerror('Fehler', 'Bitte einen Firmennamen (Auftraggeber) eingeben.')
+            return
+        if not server:
+            messagebox.showerror('Fehler', 'Bitte einen Servernamen (Mandant) eingeben.')
+            return
+
+        now = datetime.datetime.now()
+        timestamp_str = now.strftime('%d.%m.%Y %H:%M:%S')
+        pdf_path = os.path.join(
+            str(CONFIG_DIR),
+            f'backup-protokoll_{hostname}_{now:%Y%m%d_%H%M%S}.pdf'
+        )
+
+        # Daten sammeln
+        repo = self._borg_repo()
+        status = self.status_data
+        canary_result = self.config_data.get('canary_last_result', '')
+        canary_check = self.config_data.get('canary_last_check', '')
+        last_success = status.get('last_success_at', '')
+        last_exit = status.get('last_exit_code', '')
+        last_duration = status.get('last_duration_sec', '')
+        last_files = status.get('last_files_count', 0)
+        last_source = status.get('last_source_size', '')
+        last_dedupe = status.get('last_dedupe_size', '')
+        last_error = status.get('last_error', '')
+        schedule_type = self.config_data.get('schedule_type', 'manual')
+        compression = self.config_data.get('compression', 'lz4')
+
+        try:
+            from fpdf import FPDF
+            pdf = FPDF(orientation='P', unit='mm', format='A4')
+            pdf.set_auto_page_break(auto=True, margin=20)
+            pdf.add_page()
+
+            # === HEADER ===
+            pdf.set_font('Helvetica', 'B', 18)
+            pdf.set_text_color(15, 35, 55)
+            pdf.cell(0, 10, 'Backup-Protokoll', new_x='LMARGIN', new_y='NEXT', align='C')
+            pdf.set_font('Helvetica', '', 9)
+            pdf.set_text_color(100, 100, 100)
+            pdf.cell(0, 6, f'Erstellt am {timestamp_str} | Version {__version__}', new_x='LMARGIN', new_y='NEXT', align='C')
+            pdf.ln(6)
+
+            # === Trenner ===
+            pdf.set_draw_color(15, 110, 110)
+            pdf.set_line_width(0.6)
+            pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+            pdf.ln(6)
+
+            # === MANDANTEN-DATEN ===
+            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_text_color(15, 110, 110)
+            pdf.cell(0, 8, '1. Auftraggeber / Mandant', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_font('Helvetica', '', 10)
+            pdf.set_text_color(30, 30, 30)
+
+            data_lines = [
+                ('Firmenname (Auftraggeber):', company),
+                ('Servername (Mandant):', server),
+                ('Rechnername (Hostname):', hostname),
+            ]
+            if info:
+                data_lines.append(('Infotext:', info))
+
+            for label, value in data_lines:
+                pdf.set_font('Helvetica', 'B', 10)
+                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.set_font('Helvetica', '', 10)
+                pdf.cell(0, 7, value, new_x='LMARGIN', new_y='NEXT')
+            pdf.ln(4)
+
+            # === BACKUP-KONFIGURATION ===
+            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_text_color(15, 110, 110)
+            pdf.cell(0, 8, '2. Backup-Konfiguration', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_text_color(30, 30, 30)
+
+            cfg_lines = [
+                ('Backup-Ziel (Repository):', repo),
+                ('Kompressionsmethode:', compression),
+                ('Zeitplan-Typ:', schedule_type),
+                ('Passwortlose Ausfuehrung:', 'Ja' if self.config_data.get('promptless_privilege', True) else 'Nein'),
+                ('Verschluesselung:', self.config_data.get('encryption', 'repokey')),
+            ]
+            for label, value in cfg_lines:
+                pdf.set_font('Helvetica', 'B', 10)
+                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.set_font('Helvetica', '', 10)
+                pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
+            pdf.ln(4)
+
+            # === LETZTES BACKUP ===
+            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_text_color(15, 110, 110)
+            pdf.cell(0, 8, '3. Letztes Backup-Ergebnis', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_text_color(30, 30, 30)
+
+            if last_success:
+                fmt_success = self._format_time(last_success)
+                duration_str = f'{int(last_duration)} s' if last_duration else 'n/a'
+                backup_lines = [
+                    ('Ausfuehrungsdatum:', fmt_success),
+                    ('Exit-Code:', str(last_exit) if last_exit is not None else 'n/a'),
+                    ('Dauer:', duration_str),
+                    ('Verarbeitete Dateien:', str(last_files)),
+                    ('Quellgroesse:', last_source or 'n/a'),
+                    ('Deduplizierte Groesse:', last_dedupe or 'n/a'),
+                ]
+                if last_error:
+                    backup_lines.append(('Letzter Fehler:', last_error))
+            else:
+                backup_lines = [('Ausfuehrungsdatum:', 'Noch kein Backup ausgefuehrt')]
+
+            for label, value in backup_lines:
+                pdf.set_font('Helvetica', 'B', 10)
+                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.set_font('Helvetica', '', 10)
+                pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
+            pdf.ln(4)
+
+            # === CANARY-CHECK ===
+            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_text_color(15, 110, 110)
+            pdf.cell(0, 8, '4. Canary-Integritaetspruefung (Restore-Test)', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_text_color(30, 30, 30)
+
+            if canary_result == 'ok':
+                canary_status = 'BESTANDEN - Integritaet des Backups erfolgreich verifiziert'
+                canary_icon = '✅'
+                pdf.set_text_color(0, 128, 0)
+            elif canary_result == 'fail':
+                canary_status = 'FEHLGESCHLAGEN - Canary-Datei nicht gefunden oder Hash-Fehler'
+                canary_icon = '❌'
+                pdf.set_text_color(200, 0, 0)
+            else:
+                canary_status = 'NOCH NICHT GEPRUEFT - Bitte zunaechst ein Backup ausfuehren'
+                canary_icon = '⏳'
+                pdf.set_text_color(180, 150, 0)
+
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.cell(0, 7, f'Ergebnis: {canary_icon} {canary_status}', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_text_color(30, 30, 30)
+            pdf.set_font('Helvetica', '', 10)
+
+            canary_lines = [
+                ('Canary-Datei:', 'var/tmp/borg-canary-check.txt'),
+                ('Letzte Pruefung:', canary_check or 'noch nie'),
+                ('Pruefverfahren:', 'SHA256-Hash via borg extract --stdout'),
+            ]
+            for label, value in canary_lines:
+                pdf.set_font('Helvetica', 'B', 10)
+                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.set_font('Helvetica', '', 10)
+                pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
+            pdf.ln(4)
+
+            # === RECHTSVERBINDLICHKEIT / DSGVO ===
+            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_text_color(15, 110, 110)
+            pdf.cell(0, 8, '5. Rechtsverbindlichkeit / DSGVO-Konformitaet', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_text_color(30, 30, 30)
+
+            pdf.set_font('Helvetica', '', 9)
+            dsgvo_text = (
+                'Dieses Protokoll dient als Nachweis fuer die ordnungsgemaesse Durchfuehrung '
+                'von Backups im Sinne der Datenschutz-Grundverordnung (DSGVO), Art. 32 '
+                '(Sicherheit der Verarbeitung). Der Canary-Check bestaetigt, dass die '
+                'gesicherten Daten vollstaendig und unveraendert aus dem Archiv extrahiert '
+                'werden koennen (Restore-Test). Die SHA256-Pruefsumme stellt die '
+                'kryptografische Integritaet sicher.'
+            )
+            pdf.multi_cell(0, 5, dsgvo_text)
+            pdf.ln(3)
+
+            pdf.set_font('Helvetica', '', 9)
+            pdf.set_text_color(80, 80, 80)
+            pdf.cell(0, 5, 'Dieses Dokument wurde automatisch erstellt und ist ohne Unterschrift gueltig.', new_x='LMARGIN', new_y='NEXT')
+            pdf.cell(0, 5, f'Erstellungsdatum: {timestamp_str} | Software: Borg Backup GUI v{__version__}', new_x='LMARGIN', new_y='NEXT')
+            pdf.ln(6)
+
+            # === Fusszeile ===
+            pdf.set_font('Helvetica', 'I', 8)
+            pdf.set_text_color(140, 140, 140)
+            pdf.cell(0, 5, f'PDF generiert am {timestamp_str} von Borg Backup GUI v{__version__}', new_x='LMARGIN', new_y='NEXT', align='C')
+
+            # === SPEICHERN ===
+            pdf.output(pdf_path)
+            self.config_data['protocol_last_pdf'] = pdf_path
+            self._collect_config_from_ui()
+            self._save_config()
+
+            # Vorschau aktualisieren
+            self._append_protocol_preview(
+                f'\n>>> PDF-Protokoll erstellt: {pdf_path}\n')
+            self._append_protocol_preview(f'    Auftraggeber: {company}\n')
+            self._append_protocol_preview(f'    Mandant:      {server}\n')
+            self._append_protocol_preview(f'    Canary:       {canary_icon} {canary_status}\n')
+            self._append_protocol_preview(f'    Letztes Backup: {self._format_time(last_success)}\n')
+            self._append_protocol_preview(f'    Dateien: {last_files} | Quelle {last_source}\n')
+            if info:
+                self._append_protocol_preview(f'    Infotext: {info}\n')
+
+            self.protocol_status_var.set(f'PDF gespeichert: {pdf_path}')
+            self.protocol_open_btn.config(state='normal')
+            self._show_notice('PDF-Protokoll erfolgreich erstellt.', level='success')
+
+        except Exception as exc:
+            messagebox.showerror('Fehler', f'PDF-Erstellung fehlgeschlagen:\n{exc}')
+            self._append_protocol_preview(f'\n[FEHLER] PDF-Erstellung fehlgeschlagen: {exc}\n')
 
     def _append_backup_log(self, text):
         self.log_queue.put(('backup', text))

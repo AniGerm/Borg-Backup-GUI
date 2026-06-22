@@ -1779,7 +1779,7 @@ class BorgBackupGUI:
 
             for label, value in data_lines:
                 pdf.set_font('Helvetica', 'B', 10)
-                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.cell(60, 7, label, new_x='END')
                 pdf.set_font('Helvetica', '', 10)
                 pdf.cell(0, 7, value, new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)
@@ -1799,7 +1799,7 @@ class BorgBackupGUI:
             ]
             for label, value in cfg_lines:
                 pdf.set_font('Helvetica', 'B', 10)
-                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.cell(60, 7, label, new_x='END')
                 pdf.set_font('Helvetica', '', 10)
                 pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)
@@ -1828,7 +1828,7 @@ class BorgBackupGUI:
 
             for label, value in backup_lines:
                 pdf.set_font('Helvetica', 'B', 10)
-                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.cell(60, 7, label, new_x='END')
                 pdf.set_font('Helvetica', '', 10)
                 pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)
@@ -1864,7 +1864,7 @@ class BorgBackupGUI:
             ]
             for label, value in canary_lines:
                 pdf.set_font('Helvetica', 'B', 10)
-                pdf.cell(60, 7, label, new_x='END', new_y='CUR')
+                pdf.cell(60, 7, label, new_x='END')
                 pdf.set_font('Helvetica', '', 10)
                 pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)

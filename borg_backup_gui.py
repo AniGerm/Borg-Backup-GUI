@@ -1799,8 +1799,8 @@ class BorgBackupGUI:
                 ('Backup-Ziel (Repository):', repo),
                 ('Kompressionsmethode:', compression),
                 ('Zeitplan-Typ:', schedule_type),
-                ('Passwortlose Ausfuehrung:', 'Ja' if self.config_data.get('promptless_privilege', True) else 'Nein'),
-                ('Verschluesselung:', self.config_data.get('encryption', 'repokey')),
+                ('Passwortlose Ausführung:', 'Ja' if self.config_data.get('promptless_privilege', True) else 'Nein'),
+                ('Verschlüsselung:', self.config_data.get('encryption', 'repokey')),
             ]
             for label, value in cfg_lines:
                 pdf.set_font('DV', 'B', 10)
@@ -1819,17 +1819,17 @@ class BorgBackupGUI:
                 fmt_success = self._format_time(last_success)
                 duration_str = f'{int(last_duration)} s' if last_duration else 'n/a'
                 backup_lines = [
-                    ('Ausfuehrungsdatum:', fmt_success),
+                    ('Ausführungsdatum:', fmt_success),
                     ('Exit-Code:', str(last_exit) if last_exit is not None else 'n/a'),
                     ('Dauer:', duration_str),
                     ('Verarbeitete Dateien:', str(last_files)),
-                    ('Quellgroesse:', last_source or 'n/a'),
-                    ('Deduplizierte Groesse:', last_dedupe or 'n/a'),
+                    ('Quellgröße:', last_source or 'n/a'),
+                    ('Deduplizierte Größe:', last_dedupe or 'n/a'),
                 ]
                 if last_error:
                     backup_lines.append(('Letzter Fehler:', last_error))
             else:
-                backup_lines = [('Ausfuehrungsdatum:', 'Noch kein Backup ausgefuehrt')]
+                backup_lines = [('Ausführungsdatum:', 'Noch kein Backup ausgeführt')]
 
             for label, value in backup_lines:
                 pdf.set_font('DV', 'B', 10)
@@ -1841,11 +1841,11 @@ class BorgBackupGUI:
             # === CANARY-CHECK ===
             pdf.set_font('DV', 'B', 13)
             pdf.set_text_color(15, 110, 110)
-            pdf.cell(0, 8, '4. Canary-Integritaetspruefung (Restore-Test)', new_x='LMARGIN', new_y='NEXT')
+            pdf.cell(0, 8, '4. Canary-Integritätsprüfung (Restore-Test)', new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(30, 30, 30)
 
             if canary_result == 'ok':
-                canary_status = 'BESTANDEN - Integritaet des Backups erfolgreich verifiziert'
+                canary_status = 'BESTANDEN - Integrität des Backups erfolgreich verifiziert'
                 canary_icon = '\u2713'  # ✓ CHECK MARK
                 pdf.set_text_color(0, 128, 0)
             elif canary_result == 'fail':
@@ -1853,7 +1853,7 @@ class BorgBackupGUI:
                 canary_icon = '\u2718'  # ✘ HEAVY BALLOT X
                 pdf.set_text_color(200, 0, 0)
             else:
-                canary_status = 'NOCH NICHT GEPRUEFT - Bitte zunaechst ein Backup ausfuehren'
+                canary_status = 'NOCH NICHT GEPRÜFT - Bitte zunächst ein Backup ausführen'
                 canary_icon = '\u2610'  # ☐ BALLOT BOX
                 pdf.set_text_color(180, 150, 0)
 
@@ -1864,8 +1864,8 @@ class BorgBackupGUI:
 
             canary_lines = [
                 ('Canary-Datei:', 'var/tmp/borg-canary-check.txt'),
-                ('Letzte Pruefung:', canary_check or 'noch nie'),
-                ('Pruefverfahren:', 'SHA256-Hash via borg extract --stdout'),
+                ('Letzte Prüfung:', canary_check or 'noch nie'),
+                ('Prüfverfahren:', 'SHA256-Hash via borg extract --stdout'),
             ]
             for label, value in canary_lines:
                 pdf.set_font('DV', 'B', 10)
@@ -1877,24 +1877,24 @@ class BorgBackupGUI:
             # === RECHTSVERBINDLICHKEIT / DSGVO ===
             pdf.set_font('DV', 'B', 13)
             pdf.set_text_color(15, 110, 110)
-            pdf.cell(0, 8, '5. Rechtsverbindlichkeit / DSGVO-Konformitaet', new_x='LMARGIN', new_y='NEXT')
+            pdf.cell(0, 8, '5. Rechtsverbindlichkeit / DSGVO-Konformität', new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(30, 30, 30)
 
             pdf.set_font('DV', '', 9)
             dsgvo_text = (
-                'Dieses Protokoll dient als Nachweis fuer die ordnungsgemaesse Durchfuehrung '
+                'Dieses Protokoll dient als Nachweis für die ordnungsgemäße Durchführung '
                 'von Backups im Sinne der Datenschutz-Grundverordnung (DSGVO), Art. 32 '
-                '(Sicherheit der Verarbeitung). Der Canary-Check bestaetigt, dass die '
-                'gesicherten Daten vollstaendig und unveraendert aus dem Archiv extrahiert '
-                'werden koennen (Restore-Test). Die SHA256-Pruefsumme stellt die '
-                'kryptografische Integritaet sicher.'
+                '(Sicherheit der Verarbeitung). Der Canary-Check bestätigt, dass die '
+                'gesicherten Daten vollständig und unverändert aus dem Archiv extrahiert '
+                'werden können (Restore-Test). Die SHA256-Prüfsumme stellt die '
+                'kryptografische Integrität sicher.'
             )
             pdf.multi_cell(0, 5, dsgvo_text)
             pdf.ln(3)
 
             pdf.set_font('DV', '', 9)
             pdf.set_text_color(80, 80, 80)
-            pdf.cell(0, 5, 'Dieses Dokument wurde automatisch erstellt und ist ohne Unterschrift gueltig.', new_x='LMARGIN', new_y='NEXT')
+            pdf.cell(0, 5, 'Dieses Dokument wurde automatisch erstellt und ist ohne Unterschrift gültig.', new_x='LMARGIN', new_y='NEXT')
             pdf.cell(0, 5, f'Erstellungsdatum: {timestamp_str} | Software: Borg Backup GUI v{__version__}', new_x='LMARGIN', new_y='NEXT')
             pdf.ln(6)
 

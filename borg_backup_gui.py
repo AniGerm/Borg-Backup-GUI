@@ -1743,15 +1743,20 @@ class BorgBackupGUI:
         compression = self.config_data.get('compression', 'lz4')
 
         try:
+            # DejaVuSans als Unicode-Font registrieren (unterstützt Umlaute, Sonderzeichen)
+            DEJAVU = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+            DEJAVU_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
             pdf = FPDF(orientation='P', unit='mm', format='A4')
+            pdf.add_font('DV', '', DEJAVU)
+            pdf.add_font('DV', 'B', DEJAVU_BOLD)
             pdf.set_auto_page_break(auto=True, margin=20)
             pdf.add_page()
 
             # === HEADER ===
-            pdf.set_font('Helvetica', 'B', 18)
+            pdf.set_font('DV', 'B', 18)
             pdf.set_text_color(15, 35, 55)
             pdf.cell(0, 10, 'Backup-Protokoll', new_x='LMARGIN', new_y='NEXT', align='C')
-            pdf.set_font('Helvetica', '', 9)
+            pdf.set_font('DV', '', 9)
             pdf.set_text_color(100, 100, 100)
             pdf.cell(0, 6, f'Erstellt am {timestamp_str} | Version {__version__}', new_x='LMARGIN', new_y='NEXT', align='C')
             pdf.ln(6)
@@ -1763,10 +1768,10 @@ class BorgBackupGUI:
             pdf.ln(6)
 
             # === MANDANTEN-DATEN ===
-            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_font('DV', 'B', 13)
             pdf.set_text_color(15, 110, 110)
             pdf.cell(0, 8, '1. Auftraggeber / Mandant', new_x='LMARGIN', new_y='NEXT')
-            pdf.set_font('Helvetica', '', 10)
+            pdf.set_font('DV', '', 10)
             pdf.set_text_color(30, 30, 30)
 
             data_lines = [
@@ -1778,14 +1783,14 @@ class BorgBackupGUI:
                 data_lines.append(('Infotext:', info))
 
             for label, value in data_lines:
-                pdf.set_font('Helvetica', 'B', 10)
+                pdf.set_font('DV', 'B', 10)
                 pdf.cell(60, 7, label, new_x='END')
-                pdf.set_font('Helvetica', '', 10)
+                pdf.set_font('DV', '', 10)
                 pdf.cell(0, 7, value, new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)
 
             # === BACKUP-KONFIGURATION ===
-            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_font('DV', 'B', 13)
             pdf.set_text_color(15, 110, 110)
             pdf.cell(0, 8, '2. Backup-Konfiguration', new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(30, 30, 30)
@@ -1798,14 +1803,14 @@ class BorgBackupGUI:
                 ('Verschluesselung:', self.config_data.get('encryption', 'repokey')),
             ]
             for label, value in cfg_lines:
-                pdf.set_font('Helvetica', 'B', 10)
+                pdf.set_font('DV', 'B', 10)
                 pdf.cell(60, 7, label, new_x='END')
-                pdf.set_font('Helvetica', '', 10)
+                pdf.set_font('DV', '', 10)
                 pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)
 
             # === LETZTES BACKUP ===
-            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_font('DV', 'B', 13)
             pdf.set_text_color(15, 110, 110)
             pdf.cell(0, 8, '3. Letztes Backup-Ergebnis', new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(30, 30, 30)
@@ -1827,35 +1832,35 @@ class BorgBackupGUI:
                 backup_lines = [('Ausfuehrungsdatum:', 'Noch kein Backup ausgefuehrt')]
 
             for label, value in backup_lines:
-                pdf.set_font('Helvetica', 'B', 10)
+                pdf.set_font('DV', 'B', 10)
                 pdf.cell(60, 7, label, new_x='END')
-                pdf.set_font('Helvetica', '', 10)
+                pdf.set_font('DV', '', 10)
                 pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)
 
             # === CANARY-CHECK ===
-            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_font('DV', 'B', 13)
             pdf.set_text_color(15, 110, 110)
             pdf.cell(0, 8, '4. Canary-Integritaetspruefung (Restore-Test)', new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(30, 30, 30)
 
             if canary_result == 'ok':
                 canary_status = 'BESTANDEN - Integritaet des Backups erfolgreich verifiziert'
-                canary_icon = '✅'
+                canary_icon = '\u2713'  # ✓ CHECK MARK
                 pdf.set_text_color(0, 128, 0)
             elif canary_result == 'fail':
                 canary_status = 'FEHLGESCHLAGEN - Canary-Datei nicht gefunden oder Hash-Fehler'
-                canary_icon = '❌'
+                canary_icon = '\u2718'  # ✘ HEAVY BALLOT X
                 pdf.set_text_color(200, 0, 0)
             else:
                 canary_status = 'NOCH NICHT GEPRUEFT - Bitte zunaechst ein Backup ausfuehren'
-                canary_icon = '⏳'
+                canary_icon = '\u2610'  # ☐ BALLOT BOX
                 pdf.set_text_color(180, 150, 0)
 
-            pdf.set_font('Helvetica', 'B', 11)
-            pdf.cell(0, 7, f'Ergebnis: {canary_icon} {canary_status}', new_x='LMARGIN', new_y='NEXT')
+            pdf.set_font('DV', 'B', 11)
+            pdf.cell(0, 7, f'Ergebnis: [{canary_icon}] {canary_status}', new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(30, 30, 30)
-            pdf.set_font('Helvetica', '', 10)
+            pdf.set_font('DV', '', 10)
 
             canary_lines = [
                 ('Canary-Datei:', 'var/tmp/borg-canary-check.txt'),
@@ -1863,19 +1868,19 @@ class BorgBackupGUI:
                 ('Pruefverfahren:', 'SHA256-Hash via borg extract --stdout'),
             ]
             for label, value in canary_lines:
-                pdf.set_font('Helvetica', 'B', 10)
+                pdf.set_font('DV', 'B', 10)
                 pdf.cell(60, 7, label, new_x='END')
-                pdf.set_font('Helvetica', '', 10)
+                pdf.set_font('DV', '', 10)
                 pdf.cell(0, 7, str(value), new_x='LMARGIN', new_y='NEXT')
             pdf.ln(4)
 
             # === RECHTSVERBINDLICHKEIT / DSGVO ===
-            pdf.set_font('Helvetica', 'B', 13)
+            pdf.set_font('DV', 'B', 13)
             pdf.set_text_color(15, 110, 110)
             pdf.cell(0, 8, '5. Rechtsverbindlichkeit / DSGVO-Konformitaet', new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(30, 30, 30)
 
-            pdf.set_font('Helvetica', '', 9)
+            pdf.set_font('DV', '', 9)
             dsgvo_text = (
                 'Dieses Protokoll dient als Nachweis fuer die ordnungsgemaesse Durchfuehrung '
                 'von Backups im Sinne der Datenschutz-Grundverordnung (DSGVO), Art. 32 '
@@ -1887,14 +1892,14 @@ class BorgBackupGUI:
             pdf.multi_cell(0, 5, dsgvo_text)
             pdf.ln(3)
 
-            pdf.set_font('Helvetica', '', 9)
+            pdf.set_font('DV', '', 9)
             pdf.set_text_color(80, 80, 80)
             pdf.cell(0, 5, 'Dieses Dokument wurde automatisch erstellt und ist ohne Unterschrift gueltig.', new_x='LMARGIN', new_y='NEXT')
             pdf.cell(0, 5, f'Erstellungsdatum: {timestamp_str} | Software: Borg Backup GUI v{__version__}', new_x='LMARGIN', new_y='NEXT')
             pdf.ln(6)
 
             # === Fusszeile ===
-            pdf.set_font('Helvetica', 'I', 8)
+            pdf.set_font('DV', '', 8)
             pdf.set_text_color(140, 140, 140)
             pdf.cell(0, 5, f'PDF generiert am {timestamp_str} von Borg Backup GUI v{__version__}', new_x='LMARGIN', new_y='NEXT', align='C')
 

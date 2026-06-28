@@ -472,6 +472,8 @@ class BorgBackupGUI:
         data.setdefault('canary_enabled', True)
         data.setdefault('canary_last_check', '')
         data.setdefault('canary_last_result', '')
+        data.setdefault('canary_expected_hash', '')
+        data.setdefault('canary_verified_hash', '')
         data.setdefault('protocol_company_name', '')
         data.setdefault('protocol_server_name', os.uname().nodename)
         data.setdefault('protocol_info_text', '')
@@ -1347,6 +1349,10 @@ class BorgBackupGUI:
             data_text = '\n'.join(data_lines) + '\n'
             computed_hash = hashlib.sha256(data_text.encode()).hexdigest()
 
+            # Hashes fürs PDF-Protokoll speichern
+            self.config_data['canary_expected_hash'] = expected_hash
+            self.config_data['canary_verified_hash'] = stored_hash
+
             if computed_hash == stored_hash:
                 self.config_data['canary_last_result'] = 'ok'
                 self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
@@ -1732,6 +1738,8 @@ class BorgBackupGUI:
         status = self.status_data
         canary_result = self.config_data.get('canary_last_result', '')
         canary_check = self.config_data.get('canary_last_check', '')
+        canary_expected_hash = self.config_data.get('canary_expected_hash', '')
+        canary_verified_hash = self.config_data.get('canary_verified_hash', '')
         last_success = status.get('last_success_at', '')
         last_exit = status.get('last_exit_code', '')
         last_duration = status.get('last_duration_sec', '')
@@ -1867,6 +1875,10 @@ class BorgBackupGUI:
                 ('Letzte Prüfung:', canary_check or 'noch nie'),
                 ('Prüfverfahren:', 'SHA256-Hash via borg extract --stdout'),
             ]
+            if canary_expected_hash:
+                canary_lines.append(('Erwarteter Hash:', canary_expected_hash))
+            if canary_verified_hash:
+                canary_lines.append(('Verifizierter Hash:', canary_verified_hash))
             for label, value in canary_lines:
                 pdf.set_font('DV', 'B', 10)
                 pdf.cell(60, 7, label, new_x='END')

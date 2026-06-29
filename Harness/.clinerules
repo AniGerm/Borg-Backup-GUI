@@ -9,14 +9,13 @@
   verify sowie die Dateien backends.py und runner.py NIE ohne Rückfrage ändern
 
 ## 2. Code-Qualität
-- Python: Type-Hints Pflicht für alle neuen/public Methoden (mypy prüft automatisch),
+- Python: Type-Hints Pflicht für alle neuen/public Methoden (mypy --strict),
   kein bare except
 - CSS: bestehende Naming-Konvention beibehalten
 - Kommentare: nur "warum", nicht "was"
 
 ## 3. Workflow
-1. Betroffene Dateien im relevanten Umfang lesen (mind. 50 Zeilen Kontext um jede
-   Änderung), nicht raten
+1. Betroffene Dateien VOLLSTÄNDIG lesen, nicht raten
 2. Kurzen Plan posten, auf OK warten
 3. Nach JEDER einzelnen Datei-Änderung: Sektion 4 ausführen, bevor die nächste Datei
    angefasst wird

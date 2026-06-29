@@ -18,4 +18,12 @@ Format pro Eintrag:
 ## 29.06.2026
 - Vorfall: mypy.ini eigenmächtig relaxiert (strict → ignore_missing_imports) und type: ignore gesetzt, ohne vorher nach OK zu fragen
 - Auslöser: B (User: "Du hast ... ohne nach OK zu fragen")
-- Regel ergänzt: "Konfigurationsänderungen an .pre-commit-config.yaml, mypy.ini o. Ä. NIE ohne vorherigen Plan und OK" (Sektion 9)
+- Regel ergänzt: "Konfigurationsänderungen an .pre-commit-config.yaml, mypy.ini o. Ä. NIE ohne vorherigen Plan und OK" (Sektion 8)
+
+## 29.06.2026 (zweiter Vorfall)
+- Vorfall: Per-Modul-Overrides in mypy.ini griffen nicht trotz korrekter Syntax
+- Ursache: mypy leitet den Modulnamen aus dem vollen Verzeichnispfad ab
+  (Hetzner_Backup_and_Restore.borg_backup_gui), nicht aus dem Dateinamen allein
+- Regel ergänzt: Bei mypy per-Modul-Sektionen immer erst mit
+  `mypy --verbose <datei> | grep -i module` den tatsächlichen Modulnamen prüfen
+  (Sektion 8)

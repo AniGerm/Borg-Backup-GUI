@@ -65,3 +65,6 @@ Beschreibung des Vorfalls. Der Vorfall selbst kommt in MISTAKES.md, nicht in die
 - Änderungen an .pre-commit-config.yaml, mypy.ini oder vergleichbaren Config-Dateien
   NIE eigenständig vornehmen – immer erst Plan posten ("Ich würde X auf Y ändern, weil
   Z"), auf OK warten, dann erst umsetzen
+- Bei mypy per-Modul-Sektionen ([mypy-<modul>]) immer erst mit
+  `mypy --verbose <datei> | grep -i module` den tatsächlichen vollen Modulnamen prüfen,
+  bevor die Sektion angelegt wird

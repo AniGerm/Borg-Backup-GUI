@@ -1,0 +1,14 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff (Python Linter)
+        entry: .venv/bin/ruff check borg_backup_gui.py
+        language: system
+        pass_filenames: false
+
+      - id: mypy
+        name: mypy (Python Type-Check)
+        entry: .venv/bin/mypy borg_backup_gui.py
+        language: system
+        pass_filenames: false

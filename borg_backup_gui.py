@@ -372,6 +372,8 @@ class BorgBackupGUI:
         self._schedule_next_backup()
         self._update_dashboard_status()
         self.master.after(1200, self._refresh_dashboard_status)
+        # Archivliste automatisch im Hintergrund laden
+        self.master.after(2000, self._load_archive_list)
         # Tray leicht verzögert starten, damit Tk/DBus/Panel stabil initialisiert sind.
         self.master.after(700, self._setup_tray_icon)
         self.master.after(60000, self._periodic_dashboard_refresh)

@@ -6,7 +6,6 @@ Funktioniert als root für vollständige Systemsicherungen.
 __version__ = '1.2.0'
 
 import datetime
-import fcntl
 import json
 import os
 import queue
@@ -14,7 +13,6 @@ import re
 import shutil
 import socket
 import subprocess
-import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -24,19 +22,19 @@ try:
     from PIL import Image, ImageDraw
     import pystray
 except Exception:
-    Image = None
-    ImageDraw = None
+    Image = None  # type: ignore[assignment]
+    ImageDraw = None  # type: ignore[assignment]
     pystray = None
 
 try:
     from PIL import ImageTk
 except Exception:
-    ImageTk = None
+    ImageTk = None  # type: ignore[assignment]
 
 try:
     from fpdf import FPDF
 except Exception:
-    FPDF = None
+    FPDF = None  # type: ignore[assignment,misc]
 
 try:
     import gi
@@ -1162,11 +1160,8 @@ class BorgBackupGUI:
             p = profiles_list[index]
             self._set_archive_loading(True, f'Lade {p["name"]} ({index+1}/{len(profiles_list)})...')
 
-            from borg_backup_gui.backends import SSHBackend, S3Backend, LocalBackend
             # Wir brauchen eine Hilfsmethode, die aus einem Profil-Dict Env baut
             # Einfacher: temporaer config_data setzen
-            saved_type = self.config_data.get('profile_type')
-            saved_name = self.config_data.get('profile_name')
             self.config_data['profile_type'] = p.get('type', 'ssh')
             self.config_data['profile_name'] = p['name']
             self.config_data['storage'] = p.get('storage', '')
@@ -1285,7 +1280,8 @@ class BorgBackupGUI:
         expected_hash = hashlib.sha256(content_text.encode()).hexdigest()
         content_lines.append(f'SHA256: {expected_hash}')
         final_text = '\n'.join(content_lines) + '\n'
-        with open(CANARY_FILE, "w") as cf: cf.write(final_text)
+        with open(CANARY_FILE, "w") as cf:
+            cf.write(final_text)
         self.canary_expected_hash = expected_hash
         self.canary_profile_name = profile_name
         self._append_backup_log(f'\n[Canary] Check-Datei erstellt: {CANARY_FILE}\n')
@@ -1296,7 +1292,6 @@ class BorgBackupGUI:
         """Extrahiert Canary aus dem Archiv und verifiziert den Hash."""
         import hashlib
         import subprocess as _sp
-        profile_name = self.canary_profile_name if hasattr(self, 'canary_profile_name') else self.config_data.get('profile_name', 'Standard')
         expected_hash = self.canary_expected_hash if hasattr(self, 'canary_expected_hash') else ''
         canary_rel_path = 'var/tmp/borg-canary-check.txt'
         repo = self._borg_repo()
@@ -1340,7 +1335,7 @@ class BorgBackupGUI:
             if sha_line is None:
                 self.config_data['canary_last_result'] = 'fail'
                 self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log(f'[Canary] ❌ Kein SHA256-Eintrag in extrahierter Datei\n')
+                self._append_backup_log('[Canary] ❌ Kein SHA256-Eintrag in extrahierter Datei\n')
                 return False
 
             stored_hash = sha_line.split('SHA256:', 1)[1].strip()
@@ -3205,7 +3200,6 @@ class BorgBackupGUI:
         if not from_scheduler:
             self.notebook.select(self.tab_backup)
         repo = self._borg_repo()
-        env = self._borg_env()
 
         includes = [line.strip() for line in self.include_text.get('1.0', tk.END).splitlines() if line.strip()]
         excludes = [line.strip() for line in self.exclude_text.get('1.0', tk.END).splitlines() if line.strip()]
@@ -3401,8 +3395,6 @@ class BorgBackupGUI:
 
     def _load_archive_list(self):
         self._save_config()
-        profile_type = self.config_data.get('profile_type', 'ssh')
-        profile_name = self.config_data.get('profile_name', 'Standard')
         repo = self._borg_repo()
 
         if self.backup_running:
@@ -3415,7 +3407,7 @@ class BorgBackupGUI:
         self.tree.delete(*self.tree.get_children())
 
         # Cache invalidieren
-        self.archive_cache.pop(profile_name, None)
+        self.archive_cache.pop(self.config_data.get('profile_name', 'Standard'), None)
         self.cache_time = None
 
         env = self._borg_env()

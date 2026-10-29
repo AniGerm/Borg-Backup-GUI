@@ -4,7 +4,7 @@ Borg Backup GUI - Komplettes Backup-Management mit Borg und Storage Box (SSH).
 Funktioniert als root für vollständige Systemsicherungen.
 """
 
-__version__ = "2.0.3"
+__version__ = "2.0.4"
 
 import datetime
 import fcntl
@@ -27,15 +27,19 @@ from borg_model import (
     account_summary,
     account_usage_count,
     build_borg_env,
+    compute_next_run,
     destinations_for_job,
     enrich_source,
     ensure_sources,
     filter_available_includes,
+    find_schedule_overlaps,
     flatten_source_excludes,
+    format_schedule_summary,
     format_size,
     get_account,
     get_job,
     list_backup_mounts,
+    list_backup_volumes,
     list_expired_protocol_pdfs,
     list_protocol_pdfs,
     migrate_profiles_to_model,
@@ -423,7 +427,11 @@ class BorgBackupGUI:
         self.log_queue = queue.Queue()
         self.scheduled_job_id = None
         self.next_backup_dt = None
+        self.next_scheduled_job_name = None
+        self._schedule_volume_loading = False
+        self._schedule_volume_prev = self.config_data.get("profile_name", "Standard")
         self.backup_running = False
+        self.current_backup_job_name = None
         self.current_backup_started_at = None
         self.backup_files_seen = 0
         self.backup_last_item = ""
@@ -678,6 +686,9 @@ class BorgBackupGUI:
                     data.setdefault("last_source_size", "")
                     data.setdefault("last_dedupe_size", "")
                     data.setdefault("last_item", "")
+                    data.setdefault("jobs", {})
+                    if not isinstance(data.get("jobs"), dict):
+                        data["jobs"] = {}
                     return data
         except Exception:
             pass
@@ -692,6 +703,7 @@ class BorgBackupGUI:
             "last_source_size": "",
             "last_dedupe_size": "",
             "last_item": "",
+            "jobs": {},
         }
 
     def _load_archive_sizes_cache(self) -> dict[str, str]:
@@ -771,15 +783,7 @@ class BorgBackupGUI:
                 excludes = [line.strip() for line in self.exclude_text.get("1.0", tk.END).splitlines() if line.strip()]
                 self.config_data["exclude_folders"] = excludes
         if hasattr(self, "schedule_type_var"):
-            self.config_data["schedule_type"] = self.schedule_type_var.get()
-            self.config_data["schedule_interval"] = int(self.schedule_interval_var.get() or 3)
-            self.config_data["schedule_time"] = self.schedule_time_var.get().strip()
-            self.config_data["catchup_missed"] = bool(self.catchup_var.get())
-            self.config_data["prune_enabled"] = bool(self.prune_var.get())
-            self.config_data["validate_enabled"] = bool(self.validate_var.get())
-            self.config_data["validate_interval"] = int(self.validate_interval_var.get() or 3)
-            self.config_data["optimize_enabled"] = bool(self.optimize_var.get())
-            self.config_data["optimize_interval"] = int(self.optimize_interval_var.get() or 3)
+            self._sync_schedule_volume_from_ui()
         if hasattr(self, "tray_enabled_var"):
             self.config_data["tray_enabled"] = bool(self.tray_enabled_var.get())
         if hasattr(self, "tray_icon_style_var"):
@@ -854,6 +858,21 @@ class BorgBackupGUI:
     def _build_schedule_tab(self):
         tab = self.tab_schedule
 
+        volume_frame = ttk.LabelFrame(tab, text="Backup-Volumen")
+        volume_frame.pack(fill="x", padx=10, pady=10)
+        ttk.Label(volume_frame, text="Zeitplan für:").grid(row=0, column=0, sticky="w", padx=5, pady=8)
+        self.schedule_volume_var = tk.StringVar(value=self.config_data.get("profile_name", "Standard"))
+        self.schedule_volume_combo = ttk.Combobox(
+            volume_frame, textvariable=self.schedule_volume_var, state="readonly", width=40
+        )
+        self.schedule_volume_combo.grid(row=0, column=1, sticky="w", padx=5, pady=8)
+        self.schedule_volume_combo.bind("<<ComboboxSelected>>", self._on_schedule_volume_selected)
+        ttk.Label(
+            volume_frame,
+            text="Jedes Backup-Volumen (Profil) hat einen eigenen Zeitplan.",
+            style="Muted.TLabel",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 8))
+
         sched_frame = ttk.LabelFrame(tab, text="Backup-Zeitplan")
         sched_frame.pack(fill="x", padx=10, pady=10)
 
@@ -864,21 +883,28 @@ class BorgBackupGUI:
             text="Nur manuell",
             variable=self.schedule_type_var,
             value="manual",
-            command=self._on_schedule_change,
+            command=self._on_schedule_fields_changed,
         ).grid(row=0, column=0, sticky="w", padx=5, pady=5)
         ttk.Radiobutton(
             sched_frame,
             text="Regelmäßiges Backup",
             variable=self.schedule_type_var,
             value="interval",
-            command=self._on_schedule_change,
+            command=self._on_schedule_fields_changed,
         ).grid(row=1, column=0, sticky="w", padx=5, pady=5)
 
         frame_interval = ttk.Frame(sched_frame)
         frame_interval.grid(row=1, column=1, sticky="w")
         ttk.Label(frame_interval, text="Intervall:").pack(side="left", padx=5)
         self.schedule_interval_var = tk.StringVar(value=str(self.config_data.get("schedule_interval", 3)))
-        ttk.Spinbox(frame_interval, from_=1, to=168, textvariable=self.schedule_interval_var, width=5).pack(side="left")
+        ttk.Spinbox(
+            frame_interval,
+            from_=1,
+            to=168,
+            textvariable=self.schedule_interval_var,
+            width=5,
+            command=self._on_schedule_fields_changed,
+        ).pack(side="left")
         ttk.Label(frame_interval, text="Stunden").pack(side="left", padx=5)
 
         ttk.Radiobutton(
@@ -886,7 +912,7 @@ class BorgBackupGUI:
             text="Tägliches Backup",
             variable=self.schedule_type_var,
             value="daily",
-            command=self._on_schedule_change,
+            command=self._on_schedule_fields_changed,
         ).grid(row=2, column=0, sticky="w", padx=5, pady=5)
 
         frame_daily = ttk.Frame(sched_frame)
@@ -896,11 +922,32 @@ class BorgBackupGUI:
         ttk.Entry(frame_daily, textvariable=self.schedule_time_var, width=8).pack(side="left")
 
         self.catchup_var = tk.BooleanVar(value=bool(self.config_data.get("catchup_missed", True)))
-        ttk.Checkbutton(sched_frame, text="Verpasste Backups nachholen", variable=self.catchup_var).grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=5, pady=10
-        )
+        ttk.Checkbutton(
+            sched_frame,
+            text="Verpasste Backups nachholen",
+            variable=self.catchup_var,
+            command=self._on_schedule_fields_changed,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=10)
 
-        maint_frame = ttk.LabelFrame(tab, text="Wartung nach dem Backup (Vorta-Feature)")
+        overview_frame = ttk.LabelFrame(tab, text="Alle Volumen")
+        overview_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        self.schedule_overview_var = tk.StringVar(value="")
+        ttk.Label(overview_frame, textvariable=self.schedule_overview_var, justify="left").pack(
+            anchor="w", padx=8, pady=6
+        )
+        self.schedule_overlap_var = tk.StringVar(value="")
+        self.schedule_overlap_label = tk.Label(
+            overview_frame,
+            textvariable=self.schedule_overlap_var,
+            justify="left",
+            wraplength=760,
+            bg="#0b1220",
+            fg="#fbbf24",
+            anchor="w",
+        )
+        self.schedule_overlap_label.pack(fill="x", padx=8, pady=(0, 8))
+
+        maint_frame = ttk.LabelFrame(tab, text="Wartung nach dem Backup")
         maint_frame.pack(fill="x", padx=10, pady=10)
 
         self.prune_var = tk.BooleanVar(value=bool(self.config_data.get("prune_enabled", False)))
@@ -940,6 +987,7 @@ class BorgBackupGUI:
         ).grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=8)
 
         ttk.Button(tab, text="Einstellungen speichern & anwenden", command=self._on_schedule_change).pack(pady=10)
+        self.master.after(0, self._refresh_schedule_volume_combo)
 
     def _build_dashboard_tab(self):
         tab = self.tab_dashboard
@@ -1250,7 +1298,14 @@ class BorgBackupGUI:
         name = self.profile_combo.get()
         if name:
             self._apply_profile(name)
-            self._on_schedule_change()  # Zeitplan neu berechnen
+            if hasattr(self, "schedule_volume_var"):
+                self.schedule_volume_var.set(name)
+                self._schedule_volume_prev = name
+                job = get_job(self.config_data, name)
+                if job:
+                    self._schedule_fields_from_job(job)
+            self._schedule_next_backup()
+            self._refresh_schedule_volume_combo()
 
     def _show_profile_dialog(self):
         """Dialog zum Erstellen eines neuen Profils."""
@@ -1310,6 +1365,8 @@ class BorgBackupGUI:
                 messagebox.showerror("Fehler", "Dieser Name existiert bereits.")
                 return
 
+            acc_id = new_id("acc")
+            dest_id = new_id("dest")
             new_profile = {
                 "name": name,
                 "type": type_var.get(),
@@ -1333,11 +1390,60 @@ class BorgBackupGUI:
                 "s3_endpoint_url": "",
                 "s3_region": "",
                 "local_path": "",
+                "destination_ids": [dest_id],
             }
             profiles.append(new_profile)
             self.config_data["profiles"] = profiles
+            accounts = list(self.config_data.get("accounts") or [])
+            accounts.append(
+                {
+                    "id": acc_id,
+                    "name": name,
+                    "type": type_var.get(),
+                    "ssh_key": "",
+                    "passphrase": "",
+                    "s3_access_key": "",
+                    "s3_secret_key": "",
+                    "s3_endpoint_url": "",
+                    "s3_region": "",
+                }
+            )
+            self.config_data["accounts"] = accounts
+            destinations = list(self.config_data.get("destinations") or [])
+            destinations.append(
+                {
+                    "id": dest_id,
+                    "name": f"{name} Repo",
+                    "account_id": acc_id,
+                    "storage": "",
+                    "local_path": "",
+                }
+            )
+            self.config_data["destinations"] = destinations
+            jobs = list(self.config_data.get("jobs") or [])
+            jobs.append(
+                {
+                    "name": name,
+                    "include_folders": ["/"],
+                    "exclude_folders": [],
+                    "compression": "lz4",
+                    "schedule_type": "manual",
+                    "schedule_interval": 3,
+                    "schedule_time": "03:15",
+                    "catchup_missed": True,
+                    "prune_enabled": False,
+                    "validate_enabled": True,
+                    "validate_interval": 3,
+                    "optimize_enabled": False,
+                    "optimize_interval": 3,
+                    "destination_ids": [dest_id],
+                    "sources": [],
+                }
+            )
+            self.config_data["jobs"] = jobs
             self._apply_profile(name)
             self._save_config()
+            self._refresh_schedule_volume_combo()
             dialog.destroy()
             self._show_notice(f'Profil "{name}" erstellt.', level="success")
 
@@ -3662,91 +3768,269 @@ class BorgBackupGUI:
 
         return color, title
 
+    def _job_last_success(self, job_name: str) -> datetime.datetime | None:
+        jobs_status = self.status_data.get("jobs") or {}
+        if isinstance(jobs_status, dict):
+            entry = jobs_status.get(job_name) or {}
+            if isinstance(entry, dict) and entry.get("last_success_at"):
+                parsed = self._parse_iso_time(str(entry.get("last_success_at")))
+                if parsed:
+                    return parsed
+        # Legacy fallback for the active/default volume only
+        if job_name == self.config_data.get("profile_name"):
+            return self._parse_iso_time(self.status_data.get("last_success_at", ""))
+        return None
+
+    def _set_job_last_success(self, job_name: str, when: datetime.datetime) -> None:
+        if not job_name:
+            return
+        jobs_status = self.status_data.setdefault("jobs", {})
+        if not isinstance(jobs_status, dict):
+            jobs_status = {}
+            self.status_data["jobs"] = jobs_status
+        entry = jobs_status.setdefault(job_name, {})
+        if not isinstance(entry, dict):
+            entry = {}
+            jobs_status[job_name] = entry
+        entry["last_success_at"] = when.isoformat(timespec="seconds")
+
+    def _schedule_fields_from_job(self, job: dict) -> None:
+        self._schedule_volume_loading = True
+        try:
+            if hasattr(self, "schedule_type_var"):
+                self.schedule_type_var.set(str(job.get("schedule_type", "manual")))
+                self.schedule_interval_var.set(str(int(job.get("schedule_interval", 3) or 3)))
+                self.schedule_time_var.set(str(job.get("schedule_time", "03:15")))
+                self.catchup_var.set(bool(job.get("catchup_missed", True)))
+                self.prune_var.set(bool(job.get("prune_enabled", False)))
+                self.validate_var.set(bool(job.get("validate_enabled", True)))
+                self.validate_interval_var.set(str(int(job.get("validate_interval", 3) or 3)))
+                self.optimize_var.set(bool(job.get("optimize_enabled", False)))
+                self.optimize_interval_var.set(str(int(job.get("optimize_interval", 3) or 3)))
+        finally:
+            self._schedule_volume_loading = False
+
+    def _sync_schedule_volume_from_ui(self) -> None:
+        if not hasattr(self, "schedule_type_var") or not hasattr(self, "schedule_volume_var"):
+            return
+        name = (self.schedule_volume_var.get() or "").strip()
+        if not name:
+            return
+        job = get_job(self.config_data, name)
+        if job is None:
+            for profile in self.config_data.get("profiles") or []:
+                if isinstance(profile, dict) and profile.get("name") == name:
+                    job = profile
+                    break
+        if job is None:
+            return
+        try:
+            interval = int(self.schedule_interval_var.get() or 3)
+        except ValueError:
+            interval = 3
+        try:
+            validate_interval = int(self.validate_interval_var.get() or 3)
+        except ValueError:
+            validate_interval = 3
+        try:
+            optimize_interval = int(self.optimize_interval_var.get() or 3)
+        except ValueError:
+            optimize_interval = 3
+        job["schedule_type"] = self.schedule_type_var.get()
+        job["schedule_interval"] = interval
+        job["schedule_time"] = self.schedule_time_var.get().strip() or "03:15"
+        job["catchup_missed"] = bool(self.catchup_var.get())
+        job["prune_enabled"] = bool(self.prune_var.get())
+        job["validate_enabled"] = bool(self.validate_var.get())
+        job["validate_interval"] = validate_interval
+        job["optimize_enabled"] = bool(self.optimize_var.get())
+        job["optimize_interval"] = optimize_interval
+        if name == self.config_data.get("profile_name"):
+            self.config_data["schedule_type"] = job["schedule_type"]
+            self.config_data["schedule_interval"] = job["schedule_interval"]
+            self.config_data["schedule_time"] = job["schedule_time"]
+            self.config_data["catchup_missed"] = job["catchup_missed"]
+            self.config_data["prune_enabled"] = job["prune_enabled"]
+            self.config_data["validate_enabled"] = job["validate_enabled"]
+            self.config_data["validate_interval"] = job["validate_interval"]
+            self.config_data["optimize_enabled"] = job["optimize_enabled"]
+            self.config_data["optimize_interval"] = job["optimize_interval"]
+
+    def _refresh_schedule_volume_combo(self) -> None:
+        if not hasattr(self, "schedule_volume_combo"):
+            return
+        volumes = list_backup_volumes(self.config_data)
+        names = [str(v.get("name")) for v in volumes]
+        self.schedule_volume_combo["values"] = names
+        current = (self.schedule_volume_var.get() if hasattr(self, "schedule_volume_var") else "") or ""
+        active = self.config_data.get("profile_name", "")
+        if current not in names:
+            current = active if active in names else (names[0] if names else "")
+        if current:
+            self.schedule_volume_var.set(current)
+            job = get_job(self.config_data, current) or next(
+                (v for v in volumes if v.get("name") == current),
+                None,
+            )
+            if job:
+                self._schedule_fields_from_job(job)
+        self._refresh_schedule_overview()
+
+    def _on_schedule_volume_selected(self, _event=None) -> None:
+        if self._schedule_volume_loading:
+            return
+        previous = getattr(self, "_schedule_volume_prev", None)
+        selected = (self.schedule_volume_var.get() or "").strip()
+        if previous and previous != selected:
+            # Keep previous selection long enough to flush UI into that job
+            self.schedule_volume_var.set(previous)
+            self._sync_schedule_volume_from_ui()
+            self.schedule_volume_var.set(selected)
+        self._schedule_volume_prev = selected
+        job = get_job(self.config_data, selected)
+        if job is None:
+            for profile in self.config_data.get("profiles") or []:
+                if isinstance(profile, dict) and profile.get("name") == selected:
+                    job = profile
+                    break
+        if job:
+            self._schedule_fields_from_job(job)
+        self._refresh_schedule_overview()
+
+    def _on_schedule_fields_changed(self) -> None:
+        if self._schedule_volume_loading:
+            return
+        self._refresh_schedule_overview(include_unsaved=True)
+
+    def _collect_volume_next_runs(self, *, include_unsaved: bool = False) -> list[tuple[str, datetime.datetime]]:
+        now = datetime.datetime.now()
+        next_runs: list[tuple[str, datetime.datetime]] = []
+        selected = (self.schedule_volume_var.get() if hasattr(self, "schedule_volume_var") else "") or ""
+        for volume in list_backup_volumes(self.config_data):
+            name = str(volume.get("name") or "")
+            if not name:
+                continue
+            schedule_type = str(volume.get("schedule_type", "manual"))
+            schedule_interval = int(volume.get("schedule_interval", 3) or 3)
+            schedule_time = str(volume.get("schedule_time", "03:15"))
+            catchup = bool(volume.get("catchup_missed", True))
+            if include_unsaved and name == selected and hasattr(self, "schedule_type_var"):
+                schedule_type = self.schedule_type_var.get()
+                try:
+                    schedule_interval = int(self.schedule_interval_var.get() or 3)
+                except ValueError:
+                    schedule_interval = 3
+                schedule_time = self.schedule_time_var.get().strip() or "03:15"
+                catchup = bool(self.catchup_var.get())
+            nxt = compute_next_run(
+                schedule_type=schedule_type,
+                schedule_interval=schedule_interval,
+                schedule_time=schedule_time,
+                catchup_missed=catchup,
+                last_success=self._job_last_success(name),
+                now=now,
+                backup_running=bool(self.backup_running),
+            )
+            if nxt is not None:
+                next_runs.append((name, nxt))
+        return next_runs
+
+    def _refresh_schedule_overview(self, *, include_unsaved: bool = False) -> None:
+        if not hasattr(self, "schedule_overview_var"):
+            return
+        lines: list[str] = []
+        next_runs = {name: dt for name, dt in self._collect_volume_next_runs(include_unsaved=include_unsaved)}
+        selected = (self.schedule_volume_var.get() if hasattr(self, "schedule_volume_var") else "") or ""
+        for volume in list_backup_volumes(self.config_data):
+            name = str(volume.get("name") or "")
+            display = dict(volume)
+            if include_unsaved and name == selected and hasattr(self, "schedule_type_var"):
+                display["schedule_type"] = self.schedule_type_var.get()
+                display["schedule_interval"] = self.schedule_interval_var.get()
+                display["schedule_time"] = self.schedule_time_var.get()
+            summary = format_schedule_summary(display)
+            nxt = next_runs.get(name)
+            nxt_text = nxt.strftime("%d.%m.%Y %H:%M") if nxt else "—"
+            marker = " ●" if name == selected else ""
+            lines.append(f"{name}{marker}: {summary}  →  nächstes {nxt_text}")
+        self.schedule_overview_var.set("\n".join(lines) if lines else "Keine Backup-Volumen konfiguriert.")
+
+        overlaps = find_schedule_overlaps(list(next_runs.items()), window_minutes=60)
+        if overlaps:
+            parts = [
+                f"„{a}“ und „{b}“ starten innerhalb von {delta} Min."
+                if delta > 0
+                else f"„{a}“ und „{b}“ starten zur gleichen Zeit."
+                for a, b, delta in overlaps[:3]
+            ]
+            self.schedule_overlap_var.set(
+                "Warnung: Überschneidende Zeitpläne können die Performance stark beeinträchtigen.\n"
+                + " ".join(parts)
+                + (" …" if len(overlaps) > 3 else "")
+            )
+        else:
+            self.schedule_overlap_var.set("")
+
     def _on_schedule_change(self):
+        self._sync_schedule_volume_from_ui()
         self._save_config()
         self._schedule_next_backup()
-        self._show_notice("Zeitplan und Wartungseinstellungen gespeichert.", level="success")
+        self._refresh_schedule_overview()
+        overlaps = find_schedule_overlaps(self._collect_volume_next_runs(), window_minutes=60)
+        if overlaps:
+            self._show_notice(
+                "Zeitplan gespeichert — Achtung: Überschneidungen können die Performance beeinträchtigen.",
+                level="warning",
+                timeout_ms=10000,
+            )
+        else:
+            self._show_notice("Zeitplan und Wartungseinstellungen gespeichert.", level="success")
 
     def _schedule_next_backup(self):
         if hasattr(self, "scheduled_job_id") and self.scheduled_job_id:
-            self.master.after_cancel(self.scheduled_job_id)
+            try:
+                self.master.after_cancel(self.scheduled_job_id)
+            except Exception:
+                pass
             self.scheduled_job_id = None
 
-        # Fallback: wenn schedule_type_var nicht existiert, aus config_data lesen
-        mode = "manual"
-        if getattr(self, "schedule_type_var", None) is not None:
-            mode = self.schedule_type_var.get()
-        if mode == "manual":
-            # Evtl. hat das Profil einen aktiven Zeitplan, der nicht in der UI ist
-            mode = self.config_data.get("schedule_type", "manual")
-            if mode != "manual" and hasattr(self, "schedule_type_var"):
-                self.schedule_type_var.set(mode)
-        if mode == "manual":
+        next_runs = self._collect_volume_next_runs(include_unsaved=False)
+        if not next_runs:
             self.next_backup_dt = None
+            self.next_scheduled_job_name = None
+            self._refresh_schedule_overview()
             return
 
+        name, candidate = min(next_runs, key=lambda item: item[1])
         now = datetime.datetime.now()
-        candidate = None
-        catchup = False
-        if getattr(self, "catchup_var", None):
-            # Während ein Backup läuft, keinen Catchup in 5s planen, sondern regulären nächsten Termin
-            catchup = self.catchup_var.get() and not self.backup_running
-
-        last_run_str = self.status_data.get("last_success_at", "")
-        last_run = self._parse_iso_time(last_run_str)
-
-        if mode == "daily":
-            raw_time = self.config_data.get("schedule_time", "03:15").strip()
-            if hasattr(self, "schedule_time_var") and self.schedule_time_var.get().strip():
-                raw_time = self.schedule_time_var.get().strip()
-            try:
-                hour, minute = [int(x) for x in raw_time.split(":", 1)]
-                candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-                # Check for catchup
-                if candidate <= now:
-                    if catchup and (not last_run or (now - last_run).total_seconds() > 86400):
-                        # Wir haben den heutigen Termin verpasst und das letzte Backup ist > 24h her!
-                        candidate = now + datetime.timedelta(seconds=5)
-                    else:
-                        candidate += datetime.timedelta(days=1)
-            except Exception:
-                self.next_backup_dt = None
-                return
-        elif mode == "interval":
-            try:
-                hours = int(self.schedule_interval_var.get() or 3)
-            except ValueError:
-                hours = 3
-            if last_run:
-                candidate = last_run + datetime.timedelta(hours=hours)
-                if candidate <= now:
-                    if catchup:
-                        # Verpasstes Backup innerhalb von 5 Sekunden starten
-                        candidate = now + datetime.timedelta(seconds=5)
-                    else:
-                        # In die Zukunft schieben
-                        while candidate <= now:
-                            candidate += datetime.timedelta(hours=hours)
-            else:
-                candidate = now + datetime.timedelta(seconds=5)
-
-        if candidate:
-            self.next_backup_dt = candidate
-            delay_ms = int(max(0, (candidate - now).total_seconds()) * 1000)
-            self.scheduled_job_id = self.master.after(max(delay_ms, 1000), self._scheduled_backup_trigger)
+        self.next_backup_dt = candidate
+        self.next_scheduled_job_name = name
+        delay_ms = int(max(0, (candidate - now).total_seconds()) * 1000)
+        self.scheduled_job_id = self.master.after(max(delay_ms, 1000), self._scheduled_backup_trigger)
+        self._refresh_schedule_overview()
 
     def _scheduled_backup_trigger(self):
         self.scheduled_job_id = None
-        if not self.backup_running:
-            self._append_backup_log("\n>>> Geplanter täglicher Backup-Start\n")
-            self._start_backup(from_scheduler=True)
-        else:
-            self._append_backup_log("\n[WARNUNG] Geplanter Start übersprungen: Backup läuft bereits.\n")
-            # Nicht sofort neu schedulen (würde Endlosschleife erzeugen).
-            # Stattdessen in 5 Minuten erneut prüfen ob das Backup fertig ist.
+        job_name = self.next_scheduled_job_name or self.config_data.get("profile_name", "Standard")
+        if self.backup_running:
+            running = self.current_backup_job_name or "aktuelles Backup"
+            self._append_backup_log(
+                f"\n[WARNUNG] Geplanter Start für „{job_name}“ verschoben: „{running}“ läuft noch "
+                "(parallele Backups würden die Performance stark belasten).\n"
+            )
+            self._show_notice(
+                f"Zeitplan-Konflikt: „{job_name}“ wartet, bis „{running}“ fertig ist.",
+                level="warning",
+                timeout_ms=10000,
+            )
             self.scheduled_job_id = self.master.after(5 * 60 * 1000, self._scheduled_backup_trigger)
             self._update_dashboard_status()
+            return
+
+        self._append_backup_log(f"\n>>> Geplanter Backup-Start: {job_name}\n")
+        if job_name and job_name != self.config_data.get("profile_name"):
+            self._apply_profile(job_name)
+        self._start_backup(from_scheduler=True, job_name=job_name)
 
     def _periodic_dashboard_refresh(self):
         self._update_dashboard_status()
@@ -3779,7 +4063,9 @@ class BorgBackupGUI:
                 self.last_backup_var.set(f"Letzter Lauf: {formatted_last_run}")
 
         if self.next_backup_dt:
-            self.next_backup_var.set(f"Nächstes geplantes Backup: {self.next_backup_dt:%d.%m.%Y %H:%M}")
+            job_label = self.next_scheduled_job_name or ""
+            suffix = f" ({job_label})" if job_label else ""
+            self.next_backup_var.set(f"Nächstes geplantes Backup{suffix}: {self.next_backup_dt:%d.%m.%Y %H:%M}")
         else:
             self.next_backup_var.set("Nächstes geplantes Backup: deaktiviert")
 
@@ -3818,7 +4104,7 @@ class BorgBackupGUI:
 
         self._restore_stats_from_status()
 
-    def _start_backup(self, from_scheduler=False):
+    def _start_backup(self, from_scheduler=False, job_name: str | None = None):
         if self.backup_running:
             if not from_scheduler:
                 self._show_notice("Es läuft bereits ein Backup.", level="info")
@@ -3829,9 +4115,14 @@ class BorgBackupGUI:
         if self.archive_runner:
             self.archive_runner.stop()
 
+        target_job = (job_name or self.config_data.get("profile_name") or "Standard").strip()
+        if job_name and job_name != self.config_data.get("profile_name"):
+            self._apply_profile(job_name)
+
         self._save_config()
         if not from_scheduler:
             self.notebook.select(self.tab_backup)
+        self.current_backup_job_name = target_job
         repo = self._borg_repo()
 
         if hasattr(self, "sources_tree"):
@@ -4137,6 +4428,9 @@ class BorgBackupGUI:
 
         if exit_code in (0, 1) and not stopped and not exception_text and not failed_creates:
             self.status_data["last_success_at"] = finished_at.isoformat(timespec="seconds")
+            self._set_job_last_success(
+                self.current_backup_job_name or self.config_data.get("profile_name", ""), finished_at
+            )
             # Canary-Check nach erfolgreichem Backup
             if self.config_data.get("canary_enabled", True):
                 self.master.after(500, self._verify_canary)
@@ -4161,6 +4455,9 @@ class BorgBackupGUI:
             if ok_n > 0:
                 # Partial success still advances last_success for scheduling; error text stays visible
                 self.status_data["last_success_at"] = finished_at.isoformat(timespec="seconds")
+                self._set_job_last_success(
+                    self.current_backup_job_name or self.config_data.get("profile_name", ""), finished_at
+                )
                 if self.config_data.get("canary_enabled", True):
                     self.master.after(500, self._verify_canary)
             self._show_notice(self.status_data["last_error"], level="warning", timeout_ms=14000)
@@ -4177,6 +4474,7 @@ class BorgBackupGUI:
 
         self.backup_task_queue = []
         self.backup_current_task = None
+        self.current_backup_job_name = None
         self._save_status()
         self._schedule_next_backup()
         self._update_dashboard_status()
@@ -4666,16 +4964,7 @@ class BorgBackupGUI:
                 job["exclude_folders"] = excludes
         if hasattr(self, "compression_var"):
             job["compression"] = self.compression_var.get().strip() or "lz4"
-        if hasattr(self, "schedule_type_var"):
-            job["schedule_type"] = self.schedule_type_var.get()
-            job["schedule_interval"] = int(self.schedule_interval_var.get() or 3)
-            job["schedule_time"] = self.schedule_time_var.get().strip()
-            job["catchup_missed"] = bool(self.catchup_var.get())
-            job["prune_enabled"] = bool(self.prune_var.get())
-            job["validate_enabled"] = bool(self.validate_var.get())
-            job["validate_interval"] = int(self.validate_interval_var.get() or 3)
-            job["optimize_enabled"] = bool(self.optimize_var.get())
-            job["optimize_interval"] = int(self.optimize_interval_var.get() or 3)
+        # Schedule/Wartung: nur über _sync_schedule_volume_from_ui (pro Volumen)
 
     def _refresh_destinations_tree(self) -> None:
         if not hasattr(self, "dest_tree"):

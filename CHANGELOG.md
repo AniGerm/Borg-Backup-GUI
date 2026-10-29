@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.4
+
+- Zeitplan pro Backup-Volumen (Profil/Job) mit Übersicht
+- Warnung bei überschneidenden Zeitplänen (Performance)
+- Scheduler startet das nächste fällige Volumen; Konflikte werden verschoben
+- „Vorta-Feature“-Hinweis entfernt
+
 ## 2.0.3
 
 - Release zum Testen des GitHub-Auto-Updates (inkl. Neustart-UX und Versions-Footer)

@@ -203,6 +203,99 @@ def get_job(data: dict[str, Any], name: str) -> dict[str, Any] | None:
     return None
 
 
+def list_backup_volumes(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Schedulable backup volumes: prefer jobs[], fall back to legacy profiles[]."""
+    jobs = [j for j in (data.get("jobs") or []) if isinstance(j, dict) and j.get("name")]
+    if jobs:
+        return jobs
+    return [p for p in (data.get("profiles") or []) if isinstance(p, dict) and p.get("name")]
+
+
+def parse_hhmm(raw: str) -> tuple[int, int] | None:
+    text = (raw or "").strip()
+    if not text or ":" not in text:
+        return None
+    try:
+        hour_s, minute_s = text.split(":", 1)
+        hour, minute = int(hour_s), int(minute_s)
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def compute_next_run(
+    *,
+    schedule_type: str,
+    schedule_interval: int = 3,
+    schedule_time: str = "03:15",
+    catchup_missed: bool = True,
+    last_success: datetime | None = None,
+    now: datetime | None = None,
+    backup_running: bool = False,
+) -> datetime | None:
+    """Next fire time for one volume schedule, or None if manual/invalid."""
+    mode = (schedule_type or "manual").strip().lower()
+    if mode == "manual":
+        return None
+    current = now or datetime.now()
+    catchup = bool(catchup_missed) and not backup_running
+
+    if mode == "daily":
+        parsed = parse_hhmm(schedule_time)
+        if parsed is None:
+            return None
+        hour, minute = parsed
+        candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= current:
+            if catchup and (last_success is None or (current - last_success).total_seconds() > 86400):
+                return current + timedelta(seconds=5)
+            return candidate + timedelta(days=1)
+        return candidate
+
+    if mode == "interval":
+        hours = max(1, int(schedule_interval or 3))
+        if last_success is None:
+            return current + timedelta(seconds=5)
+        candidate = last_success + timedelta(hours=hours)
+        if candidate <= current:
+            if catchup:
+                return current + timedelta(seconds=5)
+            while candidate <= current:
+                candidate += timedelta(hours=hours)
+        return candidate
+
+    return None
+
+
+def find_schedule_overlaps(
+    next_runs: list[tuple[str, datetime]],
+    *,
+    window_minutes: int = 60,
+) -> list[tuple[str, str, int]]:
+    """Pairs whose next runs fall within ``window_minutes`` (inclusive)."""
+    window = max(0, int(window_minutes))
+    ordered = sorted(((str(name), dt) for name, dt in next_runs if name and dt), key=lambda item: item[1])
+    overlaps: list[tuple[str, str, int]] = []
+    for index, (name_a, dt_a) in enumerate(ordered):
+        for name_b, dt_b in ordered[index + 1 :]:
+            delta_min = int(round((dt_b - dt_a).total_seconds() / 60.0))
+            if delta_min > window:
+                break
+            overlaps.append((name_a, name_b, delta_min))
+    return overlaps
+
+
+def format_schedule_summary(job: dict[str, Any]) -> str:
+    mode = str(job.get("schedule_type", "manual")).strip().lower()
+    if mode == "daily":
+        return f"täglich {job.get('schedule_time', '03:15')}"
+    if mode == "interval":
+        return f"alle {int(job.get('schedule_interval', 3) or 3)} h"
+    return "manuell"
+
+
 def get_account(data: dict[str, Any], account_id: str) -> dict[str, Any] | None:
     for account in data.get("accounts", []):
         if isinstance(account, dict) and account.get("id") == account_id:

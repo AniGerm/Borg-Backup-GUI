@@ -8,7 +8,10 @@ from pathlib import Path
 
 from borg_model import (
     build_borg_env,
+    compute_next_run,
     ensure_sources,
+    find_schedule_overlaps,
+    format_schedule_summary,
     list_expired_protocol_pdfs,
     migrate_profiles_to_model,
     migrate_protocol_pdfs_into_subdir,
@@ -102,3 +105,33 @@ def test_build_borg_env_trust_flags() -> None:
     env_on = build_borg_env(account, dest, trust_repo_access=True)
     assert env_on.get("BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK") == "yes"
     assert "BORG_PASSPHRASE" in env_on
+
+
+def test_compute_next_run_daily_and_manual() -> None:
+    now = datetime(2026, 10, 29, 10, 0, 0)
+    assert compute_next_run(schedule_type="manual", now=now) is None
+    nxt = compute_next_run(schedule_type="daily", schedule_time="03:15", catchup_missed=False, now=now)
+    assert nxt == datetime(2026, 10, 30, 3, 15, 0)
+    assert format_schedule_summary({"schedule_type": "daily", "schedule_time": "03:15"}) == "täglich 03:15"
+
+
+def test_compute_next_run_interval() -> None:
+    now = datetime(2026, 10, 29, 12, 0, 0)
+    last = now - timedelta(hours=1)
+    nxt = compute_next_run(
+        schedule_type="interval",
+        schedule_interval=3,
+        catchup_missed=False,
+        last_success=last,
+        now=now,
+    )
+    assert nxt == last + timedelta(hours=3)
+
+
+def test_find_schedule_overlaps() -> None:
+    now = datetime(2026, 10, 29, 3, 15, 0)
+    overlaps = find_schedule_overlaps(
+        [("A", now), ("B", now + timedelta(minutes=20)), ("C", now + timedelta(hours=3))],
+        window_minutes=60,
+    )
+    assert overlaps == [("A", "B", 20)]

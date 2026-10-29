@@ -3,7 +3,7 @@
 Borg Backup GUI - Komplettes Backup-Management mit Borg und Storage Box (SSH).
 Funktioniert als root für vollständige Systemsicherungen.
 """
-__version__ = '1.2.0'
+__version__ = '1.2.1'
 
 import datetime
 import json
@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -52,6 +53,7 @@ except Exception:
 CONFIG_DIR = Path.home() / '.config' / 'borg-backup-gui'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
 STATUS_FILE = CONFIG_DIR / 'status.json'
+ARCHIVE_SIZES_FILE = CONFIG_DIR / 'archive_sizes.json'
 INSTANCE_LOCK_FILE = CONFIG_DIR / 'instance.lock'
 INSTANCE_SOCKET_FILE = CONFIG_DIR / 'instance.sock'
 ASSET_ICON_FILE = Path(__file__).resolve().parent / 'assets' / 'borg-backup-gui.svg'
@@ -64,27 +66,45 @@ INSTANCE_LOCK_HANDLE = None
 
 CANARY_FILE = '/var/tmp/borg-canary-check.txt'
 
+# Live-Log darf nicht unbegrenzt wachsen (Tk-Text hält sonst GB im RAM).
+LOG_MAX_LINES = 2000
+LOG_TRIM_BATCH = 400
+# Dateilisten-Zeilen aus borg --list nur alle N Einträge ins Log (Rest nur Live-Stats).
+LOG_LIST_SAMPLE_EVERY = 250
+DASHBOARD_THROTTLE_MS = 750
+
 # Alte Config-Pfade (für Migration)
 OLD_CONFIG_DIR = Path.home() / '.config' / 'hetzner-borg-gui'
 OLD_CONFIG_FILE = OLD_CONFIG_DIR / 'config.json'
 OLD_STATUS_FILE = OLD_CONFIG_DIR / 'status.json'
 
 
-def _migrate_old_config():
-    """Kopiert alte Konfiguration einmalig ins neue Verzeichnis."""
-    if CONFIG_FILE.exists():
-        return  # Neue Config existiert bereits
+def _migrate_old_config() -> None:
+    """Kopiert alte Konfiguration ins neue Verzeichnis falls neu fehlt oder nur Platzhalter enthält."""
     if not OLD_CONFIG_FILE.exists():
         return  # Keine alte Config zum Migrieren
-    
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        import shutil as _shutil
-        _shutil.copy2(str(OLD_CONFIG_FILE), str(CONFIG_FILE))
-        if OLD_STATUS_FILE.exists():
-            _shutil.copy2(str(OLD_STATUS_FILE), str(STATUS_FILE))
-    except Exception:
-        pass  # Migration fehlgeschlagen → startet mit Defaults
+
+    should_migrate = False
+    if not CONFIG_FILE.exists():
+        should_migrate = True
+    else:
+        try:
+            with open(CONFIG_FILE, 'r') as file_handle:
+                cur_data = json.load(file_handle)
+            if 'uXXXXXX' in str(cur_data.get('storage', '')):
+                should_migrate = True
+        except Exception:
+            should_migrate = True
+
+    if should_migrate:
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            import shutil as _shutil
+            _shutil.copy2(str(OLD_CONFIG_FILE), str(CONFIG_FILE))
+            if OLD_STATUS_FILE.exists() and not STATUS_FILE.exists():
+                _shutil.copy2(str(OLD_STATUS_FILE), str(STATUS_FILE))
+        except Exception:
+            pass
 
 
 def _activate_existing_instance():
@@ -135,12 +155,30 @@ class CommandRunner:
                     cwd=cwd
                 )
 
-                for line in self.process.stdout:
+                buf = ''
+                while True:
                     if self.stop_flag:
                         self.process.terminate()
                         result['stopped'] = True
                         break
-                    self.append_log(line)
+                    # Chunks statt Zeichen: weniger Overhead, gleiche \r-Progress-Unterstützung
+                    chunk = self.process.stdout.read(4096)
+                    if not chunk:
+                        if buf.strip():
+                            self.append_log(buf + '\n')
+                        break
+                    buf += chunk
+                    while True:
+                        nl = buf.find('\n')
+                        cr = buf.find('\r')
+                        if nl < 0 and cr < 0:
+                            break
+                        if nl < 0 or (cr >= 0 and cr < nl):
+                            line, buf = buf[:cr], buf[cr + 1:]
+                        else:
+                            line, buf = buf[:nl], buf[nl + 1:]
+                        if line.strip():
+                            self.append_log(line + '\n')
 
                 exit_code = self.process.wait()
                 result['exit_code'] = exit_code
@@ -274,6 +312,7 @@ class BorgBackupGUI:
         self.config_data = self._load_config()
         self._init_profiles_from_config()
         self.status_data = self._load_status()
+        self.archive_sizes_cache = self._load_archive_sizes_cache()
 
         self.runner = None
         self.restore_runner = None
@@ -287,6 +326,8 @@ class BorgBackupGUI:
         self.current_backup_started_at = None
         self.backup_files_seen = 0
         self.backup_last_item = ''
+        self.backup_list_log_counter = 0
+        self._dashboard_last_update_at = 0.0
         self.backup_task_queue = []
         self.backup_current_task = None
         self.archive_list_refresh_pending = False
@@ -372,12 +413,12 @@ class BorgBackupGUI:
         self._schedule_next_backup()
         self._update_dashboard_status()
         self.master.after(1200, self._refresh_dashboard_status)
-        # Archivliste automatisch im Hintergrund laden
-        self.master.after(2000, self._load_archive_list)
         # Tray leicht verzögert starten, damit Tk/DBus/Panel stabil initialisiert sind.
         self.master.after(700, self._setup_tray_icon)
+        self.master.after(8000, self._idle_archive_preload)
         self.master.after(60000, self._periodic_dashboard_refresh)
         self.master.protocol('WM_DELETE_WINDOW', self._on_close)
+        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
         
         self.master.bind("<<ShowWindow>>", lambda e: self._show_window())
         try:
@@ -510,6 +551,46 @@ class BorgBackupGUI:
             'last_dedupe_size': '',
             'last_item': ''
         }
+
+    def _load_archive_sizes_cache(self) -> dict[str, str]:
+        try:
+            if ARCHIVE_SIZES_FILE.exists():
+                with open(ARCHIVE_SIZES_FILE, 'r') as file_handle:
+                    data = json.load(file_handle)
+                    if isinstance(data, dict):
+                        return {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
+        return {}
+
+    def _save_archive_sizes_cache(self) -> None:
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(ARCHIVE_SIZES_FILE, 'w') as file_handle:
+                json.dump(self.archive_sizes_cache, file_handle, indent=2)
+        except Exception:
+            pass
+
+    def _on_tab_changed(self, event=None):
+        try:
+            selected_tab = self.notebook.select()
+            if selected_tab == str(self.tab_archive):
+                pname = self.config_data.get('profile_name', 'Standard')
+                if pname in self.archive_cache:
+                    self._display_archives_from_cache(pname)
+                elif not self.backup_running and not self.tree.get_children():
+                    self._load_archive_list()
+        except Exception:
+            pass
+
+    def _idle_archive_preload(self) -> None:
+        """Lädt im Leerlauf schonend die Archivliste vor, ohne Backups zu stören."""
+        if not self.backup_running and not self.tree.get_children():
+            pname = self.config_data.get('profile_name', 'Standard')
+            if pname in self.archive_cache:
+                self._display_archives_from_cache(pname)
+            else:
+                self._load_archive_list()
 
     def _collect_config_from_ui(self):
         if hasattr(self, 'storage_var'):
@@ -693,8 +774,14 @@ class BorgBackupGUI:
 
         ttk.Label(stats_frame, textvariable=self.backup_files_var).grid(row=0, column=0, sticky='w', padx=8, pady=(8, 2))
         ttk.Label(stats_frame, textvariable=self.backup_source_size_var).grid(row=0, column=1, sticky='w', padx=8, pady=(8, 2))
-        ttk.Label(stats_frame, textvariable=self.backup_dedupe_size_var).grid(row=1, column=0, sticky='w', padx=8, pady=(2, 8))
-        ttk.Label(stats_frame, textvariable=self.backup_last_item_var, wraplength=720).grid(row=1, column=1, sticky='w', padx=8, pady=(2, 8))
+        ttk.Label(stats_frame, textvariable=self.backup_dedupe_size_var).grid(row=1, column=0, sticky='w', padx=8, pady=(2, 4))
+        ttk.Label(stats_frame, textvariable=self.backup_last_item_var, wraplength=720).grid(row=1, column=1, sticky='w', padx=8, pady=(2, 4))
+        ttk.Label(
+            stats_frame,
+            text='Hinweis: Quell- und Deduplizierungsgröße werden beim Abschluss des Backups final berechnet.',
+            font=('Segoe UI', 8),
+            foreground='#94a3b8'
+        ).grid(row=2, column=0, columnspan=2, sticky='w', padx=8, pady=(0, 6))
 
         
 
@@ -1151,57 +1238,49 @@ class BorgBackupGUI:
         self.archive_loading_token += 1
         token = self.archive_loading_token
 
-        def _load_sequential(profiles_list, index=0, all_archives=None):
-            if all_archives is None:
-                all_archives = []
-            if index >= len(profiles_list) or token != self.archive_loading_token:
-                # Alle geladen, anzeigen
+        def _worker():
+            all_archives = []
+            for p in profiles:
+                if token != self.archive_loading_token or self.backup_running:
+                    break
+
+                repo = p.get('storage', '')
+                env = self._borg_env()
+
+                import subprocess as _sp
+                try:
+                    result = _sp.run([BORG_BIN, 'list', '--bypass-lock', repo, '--json'],
+                                     capture_output=True, text=True, env=env, timeout=60)
+                    if result.returncode == 0:
+                        import json as _json
+                        data = _json.loads(result.stdout)
+                        for arch in data.get('archives', []):
+                            name = arch.get('name', '?')
+                            time_str = arch.get('time', '?')
+                            all_archives.append((name, time_str, p['name'], p.get('type', 'ssh')))
+                except Exception:
+                    pass
+
+            def _update_ui():
+                if token != self.archive_loading_token:
+                    return
+                for name, time_str, pname, ptype in all_archives:
+                    size_hr = self.archive_sizes_cache.get(name, 'wird geladen...')
+                    self.tree.insert('', tk.END, text=name, values=(size_hr, time_str, ptype))
                 self._set_archive_loading(False, f'Archivliste geladen: {len(all_archives)} Archive (alle Profile)')
-                return
 
-            p = profiles_list[index]
-            self._set_archive_loading(True, f'Lade {p["name"]} ({index+1}/{len(profiles_list)})...')
+            self.master.after(0, _update_ui)
 
-            # Wir brauchen eine Hilfsmethode, die aus einem Profil-Dict Env baut
-            # Einfacher: temporaer config_data setzen
-            self.config_data['profile_type'] = p.get('type', 'ssh')
-            self.config_data['profile_name'] = p['name']
-            self.config_data['storage'] = p.get('storage', '')
-            self.config_data['local_path'] = p.get('local_path', '')
-            self.config_data['s3_access_key'] = p.get('s3_access_key', '')
-            self.config_data['s3_secret_key'] = p.get('s3_secret_key', '')
-            self.config_data['s3_endpoint_url'] = p.get('s3_endpoint_url', '')
-
-            repo = self._borg_repo()
-            env = self._borg_env()
-
-            import subprocess as _sp
-            try:
-                result = _sp.run([BORG_BIN, 'list', '--lock-wait=15', repo, '--json'],
-                                 capture_output=True, text=True, env=env, timeout=60)
-                if result.returncode == 0:
-                    import json as _json
-                    data = _json.loads(result.stdout)
-                    for arch in data.get('archives', []):
-                        name = arch.get('name', '?')
-                        time_str = arch.get('time', '?')
-                        all_archives.append((name, time_str, p['name'], p.get('type', 'ssh')))
-            except Exception:
-                pass
-
-            # Naechstes Profil
-            self.master.after(100, lambda: _load_sequential(profiles_list, index + 1, all_archives))
-
-        _load_sequential(profiles)
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _display_archives_from_cache(self, profile_name):
         """Zeigt gecachte Archivliste an (ohne erneuten Borg-Zugriff)."""
         cached = self.archive_cache.get(profile_name, [])
         self.tree.delete(*self.tree.get_children())
         for name, size, time_str, ptype in cached:
-            if profile_name:
-                pass  # gefiltert durch den Cache-Key
-            self.tree.insert('', tk.END, text=name, values=(size, time_str, ptype))
+            # Wenn Größe im persistenten Cache vorhanden ist, verwende diese
+            real_size = self.archive_sizes_cache.get(name, size)
+            self.tree.insert('', tk.END, text=name, values=(real_size, time_str, ptype))
         self._apply_archive_filter()
         self.archive_status_var.set(f'Archivliste geladen: {len(cached)} Archive (Cache)')
 
@@ -1214,27 +1293,18 @@ class BorgBackupGUI:
     def _apply_archive_filter(self, event=None):
         """Filtert die Archivliste nach eingegebenem Text."""
         text = self.archive_filter_var.get().lower().strip()
+        if not text:
+            return
         for item in self.tree.get_children():
             name = self.tree.item(item, 'text').lower()
-            if text:
-                self.tree.detach(item) if text not in name else None
-            else:
-                self.tree.reattach(item, '', 'end') if self.tree.exists(item) else None
-        # Vereinfachter Filter: zeige/verstecke Items
-        if text:
-            for item in self.tree.get_children():
-                if text not in self.tree.item(item, 'text').lower():
-                    self.tree.detach(item)
-        else:
-            for item in self.tree.get_children():
-                try:
-                    self.tree.move(item, '', 'end')
-                except tk.TclError:
-                    pass
+            if text not in name:
+                self.tree.detach(item)
 
     def _clear_archive_filter(self):
         self.archive_filter_var.set('')
-        self._apply_archive_filter()
+        pname = self.config_data.get('profile_name', 'Standard')
+        if pname in self.archive_cache:
+            self._display_archives_from_cache(pname)
 
     def _toggle_mount(self):
         """Toggelt zwischen Mount und Unmount."""
@@ -1291,79 +1361,87 @@ class BorgBackupGUI:
         return str(CANARY_FILE)
 
     def _verify_canary(self):
-        """Extrahiert Canary aus dem Archiv und verifiziert den Hash."""
-        import hashlib
-        import subprocess as _sp
-        expected_hash = self.canary_expected_hash if hasattr(self, 'canary_expected_hash') else ''
-        canary_rel_path = 'var/tmp/borg-canary-check.txt'
-        repo = self._borg_repo()
-        env = self._borg_env()
+        """Extrahiert Canary aus dem Archiv und verifiziert den Hash in einem Hintergrundthread."""
+        def _worker():
+            import hashlib
+            import subprocess as _sp
+            expected_hash = self.canary_expected_hash if hasattr(self, 'canary_expected_hash') else ''
+            canary_rel_path = 'var/tmp/borg-canary-check.txt'
+            repo = self._borg_repo()
+            env = self._borg_env()
 
-        # Letztes Archiv ermitteln
-        try:
-            result = _sp.run([BORG_BIN, 'list', '--lock-wait=15', '--last', '1', '--short', repo],
-                             capture_output=True, text=True, env=env, timeout=60)
-            if result.returncode != 0 or not result.stdout.strip():
+            # Letztes Archiv ermitteln
+            try:
+                result = _sp.run([BORG_BIN, 'list', '--bypass-lock', '--last', '1', '--short', repo],
+                                 capture_output=True, text=True, env=env, timeout=60)
+                if result.returncode != 0 or not result.stdout.strip():
+                    self.config_data['canary_last_result'] = 'fail'
+                    self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                    self._append_backup_log('[Canary] ❌ KEIN Archiv zum Prüfen gefunden\n')
+                    self.master.after(0, self._update_dashboard_status)
+                    return
+                latest_archive = result.stdout.strip().split('\n')[0].strip()
+            except Exception as e:
                 self.config_data['canary_last_result'] = 'fail'
-                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log('[Canary] ❌ KEIN Archiv zum Prüfen gefunden\n')
-                return False
-            latest_archive = result.stdout.strip().split('\n')[0].strip()
-        except Exception as e:
-            self.config_data['canary_last_result'] = 'fail'
-            self._append_backup_log(f'[Canary] ❌ Archiv-Ermittlung fehlgeschlagen: {e}\n')
-            return False
+                self._append_backup_log(f'[Canary] ❌ Archiv-Ermittlung fehlgeschlagen: {e}\n')
+                self.master.after(0, self._update_dashboard_status)
+                return
 
-        # Canary: Datei aus dem Archiv extrahieren und SHA256-Hash verifizieren
-        try:
-            extract = _sp.run([BORG_BIN, 'extract', '--stdout', '--lock-wait=15', f'{repo}::{latest_archive}', canary_rel_path],
-                              capture_output=True, text=True, env=env, timeout=60)
-            if extract.returncode != 0 or not extract.stdout.strip():
-                self.config_data['canary_last_result'] = 'fail'
-                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log(f'[Canary] ❌ Datei NICHT im Archiv: {canary_rel_path}\n')
-                return False
+            # Canary: Datei aus dem Archiv extrahieren und SHA256-Hash verifizieren
+            try:
+                extract = _sp.run([BORG_BIN, 'extract', '--stdout', '--bypass-lock', f'{repo}::{latest_archive}', canary_rel_path],
+                                  capture_output=True, text=True, env=env, timeout=60)
+                if extract.returncode != 0 or not extract.stdout.strip():
+                    self.config_data['canary_last_result'] = 'fail'
+                    self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                    self._append_backup_log(f'[Canary] ❌ Datei NICHT im Archiv: {canary_rel_path}\n')
+                    self.master.after(0, self._update_dashboard_status)
+                    return
 
-            # Aus extrahiertem Inhalt den gespeicherten SHA256-Hash ermitteln
-            content_lines = extract.stdout.strip().split('\n')
-            sha_line = None
-            data_lines = []
-            for line in content_lines:
-                if line.startswith('SHA256:'):
-                    sha_line = line
+                # Aus extrahiertem Inhalt den gespeicherten SHA256-Hash ermitteln
+                content_lines = extract.stdout.strip().split('\n')
+                sha_line = None
+                data_lines = []
+                for line in content_lines:
+                    if line.startswith('SHA256:'):
+                        sha_line = line
+                    else:
+                        data_lines.append(line)
+
+                if sha_line is None:
+                    self.config_data['canary_last_result'] = 'fail'
+                    self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                    self._append_backup_log('[Canary] ❌ Kein SHA256-Eintrag in extrahierter Datei\n')
+                    self.master.after(0, self._update_dashboard_status)
+                    return
+
+                stored_hash = sha_line.split('SHA256:', 1)[1].strip()
+
+                # Hash des Daten-Teils neu berechnen
+                data_text = '\n'.join(data_lines) + '\n'
+                computed_hash = hashlib.sha256(data_text.encode()).hexdigest()
+
+                # Hashes fürs PDF-Protokoll speichern
+                self.config_data['canary_expected_hash'] = expected_hash
+                self.config_data['canary_verified_hash'] = stored_hash
+
+                if computed_hash == stored_hash:
+                    self.config_data['canary_last_result'] = 'ok'
+                    self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                    self._append_backup_log(f'[Canary] ✅ Integrität bestätigt – Hash {stored_hash[:16]}...\n')
                 else:
-                    data_lines.append(line)
+                    self.config_data['canary_last_result'] = 'fail'
+                    self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
+                    self._append_backup_log(f'[Canary] ❌ Hash-Fehler – erwartet {expected_hash[:16]}... != extrahiert {stored_hash[:16]}...\n')
 
-            if sha_line is None:
+                self._save_config()
+                self.master.after(0, self._update_dashboard_status)
+            except Exception as e:
                 self.config_data['canary_last_result'] = 'fail'
-                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log('[Canary] ❌ Kein SHA256-Eintrag in extrahierter Datei\n')
-                return False
+                self._append_backup_log(f'[Canary] ❌ Verifikation fehlgeschlagen: {e}\n')
+                self.master.after(0, self._update_dashboard_status)
 
-            stored_hash = sha_line.split('SHA256:', 1)[1].strip()
-
-            # Hash des Daten-Teils neu berechnen
-            data_text = '\n'.join(data_lines) + '\n'
-            computed_hash = hashlib.sha256(data_text.encode()).hexdigest()
-
-            # Hashes fürs PDF-Protokoll speichern
-            self.config_data['canary_expected_hash'] = expected_hash
-            self.config_data['canary_verified_hash'] = stored_hash
-
-            if computed_hash == stored_hash:
-                self.config_data['canary_last_result'] = 'ok'
-                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log(f'[Canary] ✅ Integrität bestätigt – Hash {stored_hash[:16]}...\n')
-                return True
-            else:
-                self.config_data['canary_last_result'] = 'fail'
-                self.config_data['canary_last_check'] = datetime.datetime.now().isoformat(timespec='seconds')
-                self._append_backup_log(f'[Canary] ❌ Hash-Fehler – erwartet {expected_hash[:16]}... != extrahiert {stored_hash[:16]}...\n')
-                return False
-        except Exception as e:
-            self.config_data['canary_last_result'] = 'fail'
-            self._append_backup_log(f'[Canary] ❌ Verifikation fehlgeschlagen: {e}\n')
-            return False
+        threading.Thread(target=_worker, daemon=True).start()
     def _build_backup_tab(self):
         tab = self.tab_backup
         tab.columnconfigure(0, weight=1)
@@ -1690,6 +1768,7 @@ class BorgBackupGUI:
     def _append_protocol_preview(self, text):
         self.protocol_preview.configure(state='normal')
         self.protocol_preview.insert(tk.END, text)
+        self._trim_text_widget(self.protocol_preview, max_lines=500, trim_batch=100)
         self.protocol_preview.see(tk.END)
         self.protocol_preview.configure(state='disabled')
 
@@ -1946,6 +2025,42 @@ class BorgBackupGUI:
     def _append_restore_log(self, text):
         self.log_queue.put(('restore', text))
 
+    @staticmethod
+    def _is_borg_file_list_line(text: str) -> bool:
+        """Erkennt borg --list Dateizeilen (A/M/U/... path), die den RAM sprengen würden."""
+        line = text.strip()
+        if not line:
+            return False
+        if line.startswith(('/', './', '../')):
+            return True
+        return len(line) > 2 and line[0] in 'AMUCdE-' and line[1] == ' '
+
+    @staticmethod
+    def _trim_text_widget(widget, max_lines=LOG_MAX_LINES, trim_batch=LOG_TRIM_BATCH):
+        """Schneidet älteste Zeilen ab, sobald das Log zu groß wird."""
+        if widget is None:
+            return
+        try:
+            end_index = widget.index('end-1c')
+            line_count = int(float(end_index.split('.')[0]))
+        except Exception:
+            return
+        if line_count <= max_lines:
+            return
+        drop = max(trim_batch, line_count - max_lines)
+        try:
+            widget.delete('1.0', f'{drop + 1}.0')
+        except Exception:
+            pass
+
+    def _should_show_in_backup_log(self, text: str) -> bool:
+        """Dateilisten nur stichprobenartig ins Live-Log; Rest läuft über Live-Stats."""
+        if not self._is_borg_file_list_line(text):
+            return True
+        self.backup_list_log_counter += 1
+        counter = int(self.backup_list_log_counter)
+        return counter == 1 or (counter % LOG_LIST_SAMPLE_EVERY == 0)
+
     def _process_log_queue(self):
         while True:
             try:
@@ -1955,23 +2070,35 @@ class BorgBackupGUI:
 
             if target == 'backup' and self.log_widget:
                 self._update_backup_progress(text)
-                self.log_widget.configure(state='normal')
-                self.log_widget.insert(tk.END, text)
-                self.log_widget.see(tk.END)
-                self.log_widget.configure(state='disabled')
+                if self._should_show_in_backup_log(text):
+                    self.log_widget.configure(state='normal')
+                    if self._is_borg_file_list_line(text):
+                        sample = (
+                            f'[… {self.backup_list_log_counter} Dateien gelistet, '
+                            f'zuletzt: {text.strip()[:110]}]\n'
+                        )
+                        self.log_widget.insert(tk.END, sample)
+                    else:
+                        self.log_widget.insert(tk.END, text)
+                    self._trim_text_widget(self.log_widget)
+                    self.log_widget.see(tk.END)
+                    self.log_widget.configure(state='disabled')
             elif target == 'restore' and self.restore_log:
                 self.restore_log.configure(state='normal')
                 self.restore_log.insert(tk.END, text)
+                self._trim_text_widget(self.restore_log)
                 self.restore_log.see(tk.END)
                 self.restore_log.configure(state='disabled')
 
-        # Fallback-Takt: hält die Tray-Livewerte im Sekundentakt frisch,
+        # Fallback-Takt: hält die Tray-Livewerte und Dashboard-Laufzeit im Sekundentakt frisch,
         # auch wenn ein einzelner Timer-Callback verspätet kommt.
-        if self.backup_running and self.tray_runtime_available and self.config_data.get('tray_enabled', True):
+        if self.backup_running:
             now = datetime.datetime.now()
             if self.tray_menu_last_refresh_at is None or (now - self.tray_menu_last_refresh_at).total_seconds() >= 1.0:
                 self.tray_menu_last_refresh_at = now
-                self._update_tray_menu_labels()
+                if self.tray_runtime_available and self.config_data.get('tray_enabled', True):
+                    self._update_tray_menu_labels()
+                self._update_dashboard_status(force=True)
         else:
             self.tray_menu_last_refresh_at = None
 
@@ -2003,14 +2130,15 @@ class BorgBackupGUI:
     def _reset_backup_progress(self):
         self.backup_files_seen = 0
         self.backup_last_item = ''
+        self.backup_list_log_counter = 0
         if hasattr(self, 'backup_files_var'):
             self.backup_files_var.set('Gefundene/verarbeitete Dateien: 0')
         if hasattr(self, 'backup_source_size_var'):
-            self.backup_source_size_var.set('Quellgröße: noch keine Daten')
+            self.backup_source_size_var.set('Quellgröße: wird beim Abschluss berechnet')
         if hasattr(self, 'backup_dedupe_size_var'):
-            self.backup_dedupe_size_var.set('Dedupliziert: noch keine Daten')
+            self.backup_dedupe_size_var.set('Dedupliziert: wird beim Abschluss berechnet')
         if hasattr(self, 'backup_last_item_var'):
-            self.backup_last_item_var.set('Zuletzt: noch keine Daten')
+            self.backup_last_item_var.set('Zuletzt: arbeite...')
         self.status_data['last_files_count'] = 0
         self.status_data['last_source_size'] = ''
         self.status_data['last_dedupe_size'] = ''
@@ -2036,35 +2164,29 @@ class BorgBackupGUI:
             self._save_status()
 
     def _restore_stats_from_status(self):
+        if self.backup_running:
+            # Während ein Backup läuft, Live-Werte beibehalten
+            files_count = self.backup_files_seen or self.status_data.get('last_files_count', 0)
+            if hasattr(self, 'backup_files_var'):
+                self.backup_files_var.set(f'Gefundene/verarbeitete Dateien: {files_count}')
+            if hasattr(self, 'backup_last_item_var'):
+                last_item = self.backup_last_item or self.status_data.get('last_item', '')
+                self.backup_last_item_var.set(f'Zuletzt: {last_item[:110]}' if last_item else 'Zuletzt: arbeite...')
+            if hasattr(self, 'backup_source_size_var'):
+                src = self.status_data.get('last_source_size', '')
+                self.backup_source_size_var.set(f'Quellgröße: {src}' if src else 'Quellgröße: wird beim Abschluss berechnet')
+            if hasattr(self, 'backup_dedupe_size_var'):
+                ded = self.status_data.get('last_dedupe_size', '')
+                self.backup_dedupe_size_var.set(f'Dedupliziert: {ded}' if ded else 'Dedupliziert: wird beim Abschluss berechnet')
+            return
+
         files_count = self.status_data.get('last_files_count', 0)
-        stats_missing = self._stats_missing_from_status()
-        if not files_count and self.status_data.get('last_success_at'):
-            files_label = 'wird geladen...' if stats_missing else 'nicht verfügbar'
-        else:
-            files_label = str(files_count)
-
-        source_size = self.status_data.get('last_source_size', '')
-        dedupe_size = self.status_data.get('last_dedupe_size', '')
-        last_item = self.status_data.get('last_item', '')
-
-        if not source_size:
-            if stats_missing:
-                source_size = 'wird geladen...'
-            else:
-                source_size = 'nicht verfügbar' if self.status_data.get('last_success_at') else 'noch keine Daten'
-        if not dedupe_size:
-            if stats_missing:
-                dedupe_size = 'wird geladen...'
-            else:
-                dedupe_size = 'nicht verfügbar' if self.status_data.get('last_success_at') else 'noch keine Daten'
-        if not last_item:
-            if stats_missing:
-                last_item = 'wird geladen...'
-            else:
-                last_item = 'nicht verfügbar' if self.status_data.get('last_success_at') else 'noch keine Daten'
+        source_size = self.status_data.get('last_source_size', '') or 'noch keine Daten'
+        dedupe_size = self.status_data.get('last_dedupe_size', '') or 'noch keine Daten'
+        last_item = self.status_data.get('last_item', '') or 'noch keine Daten'
 
         if hasattr(self, 'backup_files_var'):
-            self.backup_files_var.set(f'Gefundene/verarbeitete Dateien: {files_label}')
+            self.backup_files_var.set(f'Gefundene/verarbeitete Dateien: {files_count}')
         if hasattr(self, 'backup_source_size_var'):
             self.backup_source_size_var.set(f'Quellgröße: {source_size}')
         if hasattr(self, 'backup_dedupe_size_var'):
@@ -2092,9 +2214,11 @@ class BorgBackupGUI:
         threading.Thread(target=self._refresh_stats_from_latest_archive_worker, daemon=True).start()
 
     def _refresh_stats_from_latest_archive_worker(self):
+        if self.backup_running:
+            return
         repo = self._borg_repo()
         env = self._borg_env()
-        cmd = [BORG_BIN, 'info', '--lock-wait=30', '--last', '1', repo]
+        cmd = [BORG_BIN, 'info', '--bypass-lock', '--last', '1', repo]
         cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
 
         try:
@@ -2158,14 +2282,20 @@ class BorgBackupGUI:
             self._update_dashboard_status()
             return
 
-        if line.startswith('/') or line.startswith('./') or line.startswith('../'):
+        # Erkenne einzelne Dateien aus borg create --list (A /path, M /path, U /path etc.)
+        is_list_line = self._is_borg_file_list_line(line)
+        if is_list_line:
             self.backup_files_seen += 1
+            clean_item = line[2:].strip() if line[0] in 'AMUCdE-' and line[1] == ' ' else line
             if hasattr(self, 'backup_files_var'):
                 self.backup_files_var.set(f'Gefundene/verarbeitete Dateien: {self.backup_files_seen}')
-            self.backup_last_item = line
+            self.backup_last_item = clean_item
             if hasattr(self, 'backup_last_item_var'):
-                self.backup_last_item_var.set(f'Zuletzt: {line[:110]}')
-            self._set_live_stats(files_count=self.backup_files_seen, last_item=line[:110])
+                self.backup_last_item_var.set(f'Zuletzt: {clean_item[:110]}')
+            self._set_live_stats(files_count=self.backup_files_seen, last_item=clean_item[:110])
+            # Pro Datei das ganze Dashboard neu zu zeichnen frisst CPU/RAM – drosseln.
+            self._update_dashboard_status()
+            return
 
         match_files = re.search(r'(?:Number of files|Files)\s*:\s*(\d+)', line)
         if match_files and hasattr(self, 'backup_files_var'):
@@ -2193,7 +2323,7 @@ class BorgBackupGUI:
                 self.backup_dedupe_size_var.set(f'Dedupliziert: {match_archive_totals.group(3)}')
             self._set_live_stats(source_size=match_archive_totals.group(1), dedupe_size=match_archive_totals.group(3))
 
-        self._update_dashboard_status()
+        self._update_dashboard_status(force=True)
 
     def _select_ssh_key(self):
         filename = filedialog.askopenfilename(
@@ -2219,8 +2349,9 @@ class BorgBackupGUI:
         env = os.environ.copy()
         profile_type = self.config_data.get('profile_type', 'ssh')
 
-        # Cache immer setzen
+        # Cache & ungepuffertes Live-Logging immer setzen
         env['BORG_CACHE_DIR'] = os.path.expanduser('~/.cache/borg')
+        env['PYTHONUNBUFFERED'] = '1'
 
         if profile_type == 's3':
             # S3 Object Storage – KEIN BORG_RSH!
@@ -3069,7 +3200,8 @@ class BorgBackupGUI:
         candidate = None
         catchup = False
         if getattr(self, 'catchup_var', None):
-            catchup = self.catchup_var.get()
+            # Während ein Backup läuft, keinen Catchup in 5s planen, sondern regulären nächsten Termin
+            catchup = self.catchup_var.get() and not self.backup_running
 
         last_run_str = self.status_data.get('last_success_at', '')
         last_run = self._parse_iso_time(last_run_str)
@@ -3131,7 +3263,12 @@ class BorgBackupGUI:
         self._update_dashboard_status()
         self.master.after(60000, self._periodic_dashboard_refresh)
 
-    def _update_dashboard_status(self):
+    def _update_dashboard_status(self, force=False):
+        now_mono = time.monotonic()
+        if not force and (now_mono - self._dashboard_last_update_at) * 1000 < DASHBOARD_THROTTLE_MS:
+            return
+        self._dashboard_last_update_at = now_mono
+
         last_run = self._parse_iso_time(self.status_data.get('last_run_at', ''))
         last_error = self.status_data.get('last_error', '')
 
@@ -3198,6 +3335,11 @@ class BorgBackupGUI:
                 self._show_notice('Es läuft bereits ein Backup.', level='info')
             return
 
+        # Hintergrund-Leseoperationen sofort abbrechen, um Lock-Konflikte zu vermeiden
+        self.archive_loading_token += 1
+        if self.archive_runner:
+            self.archive_runner.stop()
+
         self._save_config()
         if not from_scheduler:
             self.notebook.select(self.tab_backup)
@@ -3225,7 +3367,8 @@ class BorgBackupGUI:
             if canary_path not in includes:
                 includes.append(canary_path)
 
-        create_cmd = [BORG_BIN, 'create', '--lock-wait=30', '-v', '--stats', '--progress', f'--compression={compression}']
+        # Ohne --list: Progress liefert Live-Stats; --list füllte das Tk-Log mit Millionen Zeilen (RAM-Leck).
+        create_cmd = [BORG_BIN, 'create', '--lock-wait=60', '--progress', '-v', '--stats', f'--compression={compression}']
 
         # Canary-Datei per --pattern explizit einschliessen (MUSS vor ARCHIVE stehen!)
         if canary_enabled:
@@ -3413,7 +3556,7 @@ class BorgBackupGUI:
         self.cache_time = None
 
         env = self._borg_env()
-        cmd = [BORG_BIN, 'list', '--lock-wait=30', repo, '--json']
+        cmd = [BORG_BIN, 'list', '--bypass-lock', repo, '--json']
         cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
 
         self._append_backup_log('Lade Archivliste... (Timeout: 120s)\n')
@@ -3423,17 +3566,17 @@ class BorgBackupGUI:
     def _on_archive_list_loaded(self, result):
         ex = result.get('exception', '')
         if ex:
-            self._set_archive_loading(False)
-            messagebox.showerror('Fehler', str(ex))
+            self._set_archive_loading(False, 'Fehler beim Laden')
+            self._show_notice(f'Archivliste: {ex}', level='error')
             return
         if result['exit_code'] != 0:
-            self._set_archive_loading(False)
             err = result['stderr'].strip() or result['stdout'].strip() or 'Unbekannter Fehler'
             # Bei leerem/nicht initiiertem Repository: freundliche Meldung
             if 'Repository' in err and ('does not exist' in err or 'not found' in err):
-                self._set_archive_loading(False, 'Noch kein Repository initialisiert - führe zuerst ein Backup aus.')
+                self._set_archive_loading(False, 'Noch kein Repository initialisiert')
                 return
-            messagebox.showerror('Fehler', f'borg list fehlgeschlagen:\n{err}')
+            self._set_archive_loading(False, 'Fehler beim Laden')
+            self._show_notice(f'Archivliste fehlgeschlagen: {err[:120]}', level='error')
             return
         try:
             profile_name = self.config_data.get('profile_name', 'Standard')
@@ -3449,11 +3592,20 @@ class BorgBackupGUI:
             token = self.archive_loading_token
             rows = []
             cache_list = []
+            missing_count = 0
             for archive in archives:
                 name = archive.get('name') or archive.get('archive') or '?'
                 time_str = archive.get('time', '?')
                 size = archive.get('stats', {}).get('original_size', None)
-                size_hr = self._human_size(size) if size else 'wird geladen...'
+                if size:
+                    size_hr = self._human_size(size)
+                    self.archive_sizes_cache[name] = size_hr
+                elif name in self.archive_sizes_cache:
+                    size_hr = self.archive_sizes_cache[name]
+                else:
+                    size_hr = 'wird geladen...'
+                    missing_count += 1
+
                 item_id = self.tree.insert('', tk.END, text=name, values=(size_hr, time_str, profile_type))
                 rows.append((item_id, name, size_hr, profile_type))
                 cache_list.append((name, size_hr, time_str, profile_type))
@@ -3461,9 +3613,14 @@ class BorgBackupGUI:
             # Cache speichern
             self.archive_cache[profile_name] = cache_list
             self.cache_time = datetime.datetime.now()
+            self._save_archive_sizes_cache()
 
-            self._set_archive_loading(True, f'Archivgrößen werden geladen (0/{len(rows)})...')
-            threading.Thread(target=self._populate_archive_sizes_async, args=(rows, token, profile_name), daemon=True).start()
+            if missing_count == 0:
+                self._set_archive_loading(False, f'Archivliste geladen: {len(rows)} Archive')
+                self._show_notice(f'Archivliste geladen: {len(rows)} Archive.', level='success')
+            else:
+                self._set_archive_loading(True, f'Archivgrößen werden geladen (0/{missing_count})...')
+                threading.Thread(target=self._populate_archive_sizes_async, args=(rows, token, profile_name), daemon=True).start()
         except Exception as exc:
             self._set_archive_loading(False)
             messagebox.showerror('Fehler', str(exc))
@@ -3482,15 +3639,29 @@ class BorgBackupGUI:
                     self.archive_progress.pack_forget()
 
     def _populate_archive_sizes_async(self, rows, token, profile_name=None):
-        total = len(rows)
-        for index, (item_id, archive_name, _, _ptype) in enumerate(rows, start=1):
-            if token != self.archive_loading_token:
+        import time as _time
+        # Nur Zeilen abfragen, deren Größe noch nicht bekannt ist
+        missing_rows = [(iid, name, ptype) for (iid, name, size, ptype) in rows if name not in self.archive_sizes_cache or self.archive_sizes_cache[name] == 'wird geladen...']
+        total = len(missing_rows)
+        if total == 0:
+            self.master.after(0, lambda: self._set_archive_loading(False, f'Archivliste geladen: {len(rows)} Archive'))
+            return
+
+        for index, (item_id, archive_name, _ptype) in enumerate(missing_rows, start=1):
+            if token != self.archive_loading_token or self.backup_running:
                 return
             size_label = self._query_archive_size_label(archive_name)
+            if token != self.archive_loading_token or self.backup_running:
+                return
+            if size_label and size_label != 'n/a':
+                self.archive_sizes_cache[archive_name] = size_label
+                self._save_archive_sizes_cache()
             self.master.after(
                 0,
                 lambda iid=item_id, size=size_label, idx=index, count=total, current_token=token, pn=profile_name: self._update_archive_row_size(iid, size, idx, count, current_token, pn)
             )
+            # Sanfte Pause, damit Backups und SSH-Verbindung nicht überlastet werden
+            _time.sleep(0.3)
 
     def _update_archive_row_size(self, item_id, size_label, index, total, token, profile_name=None):
         if token != self.archive_loading_token or not self.tree.exists(item_id):
@@ -3508,13 +3679,15 @@ class BorgBackupGUI:
             self._set_archive_loading(True, f'Archivgrößen werden geladen ({index}/{total})...')
 
     def _query_archive_size_label(self, archive_name):
+        if self.backup_running:
+            return 'n/a'
         repo = self._borg_repo()
         env = self._borg_env()
-        cmd = [BORG_BIN, 'info', '--lock-wait=30', f'{repo}::{archive_name}']
+        cmd = [BORG_BIN, 'info', '--bypass-lock', f'{repo}::{archive_name}']
         cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
         except Exception:
             return 'n/a'
 

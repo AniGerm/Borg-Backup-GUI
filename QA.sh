@@ -15,13 +15,12 @@ if [[ ! -x "$PY" ]]; then
   exit 1
 fi
 
-TARGETS=(borg_backup_gui.py)
-if [[ -f borg_model.py ]]; then
-  TARGETS+=(borg_model.py)
-fi
-if [[ -f borg_updates.py ]]; then
-  TARGETS+=(borg_updates.py)
-fi
+TARGETS=(borg_backup_gui.py borg_model.py borg_updates.py)
+for extra in borg_engine.py borg_daemon.py borg_ipc.py borg_sysconfig.py; do
+  if [[ -f "$extra" ]]; then
+    TARGETS+=("$extra")
+  fi
+done
 
 pass=0
 fail=0
@@ -63,7 +62,8 @@ run_check "ruff_format" 15 1 "$RUFF" format --check "${TARGETS[@]}"
 run_check "mypy" 20 1 "$MYPY" --explicit-package-bases "${TARGETS[@]}"
 run_check "pytest" 20 1 "$PYTEST" -q
 # S310: intentional urllib to GitHub Releases in borg_updates.py
-run_check "ruff_security" 5 0 "$RUFF" check --select S --ignore S108,S110,S310,S603,S607 "${TARGETS[@]}"
+# S101: asserts in IPC client; S105: SECRET_MASK placeholder (not a password)
+run_check "ruff_security" 5 0 "$RUFF" check --select S --ignore S101,S105,S108,S110,S310,S603,S607 "${TARGETS[@]}"
 
 echo ""
 echo "========================================"

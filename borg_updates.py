@@ -6,6 +6,7 @@ cache, install via ``pkexec`` + ``apply-update.sh`` (or apt/dpkg fallback).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ _state: dict[str, Any] = {
     "deb_size": 0,
     "download_path": None,
     "download_percent": 0,
+    "sha256_url": None,
     "error": None,
     "checked_at": None,
     "repo": GITHUB_REPO,
@@ -50,6 +52,8 @@ class DebReleaseInfo:
     deb_url: str
     deb_name: str
     size: int
+    sha256_url: str | None = None
+    sha256_expected: str | None = None
 
 
 def app_version(fallback: str = "0.0.0") -> str:
@@ -91,11 +95,13 @@ def is_version_newer(remote: str, local: str) -> bool:
 
 def release_to_deb_info(release: dict[str, Any]) -> DebReleaseInfo | None:
     asset = None
+    sha_asset = None
     for item in release.get("assets") or []:
         name = str(item.get("name") or "")
         if DEB_NAME_RE.match(name):
             asset = item
-            break
+        elif name.upper() in {"SHA256SUMS", "SHA256SUMS.TXT"} or name.lower().endswith(".sha256"):
+            sha_asset = item
     if not asset:
         return None
     url = str(asset.get("browser_download_url") or "")
@@ -107,6 +113,7 @@ def release_to_deb_info(release: dict[str, Any]) -> DebReleaseInfo | None:
         deb_url=url,
         deb_name=str(asset.get("name") or ""),
         size=int(asset.get("size") or 0),
+        sha256_url=str(sha_asset.get("browser_download_url") or "") if sha_asset else None,
     )
 
 
@@ -176,6 +183,7 @@ def check_for_update(current: str | None = None) -> dict[str, Any]:
             deb_name=latest.deb_name if newer else None,
             deb_url=latest.deb_url if newer else None,
             deb_size=latest.size if newer else 0,
+            sha256_url=latest.sha256_url if newer else None,
             download_path=None,
             download_percent=0,
             error=None,
@@ -195,12 +203,54 @@ def _cache_dir() -> Path:
     return path
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _expected_sha256_from_sums(text: str, deb_name: str) -> str | None:
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[-1].endswith(deb_name):
+            candidate = parts[0].lower()
+            if re.fullmatch(r"[0-9a-f]{64}", candidate):
+                return candidate
+    return None
+
+
+def verify_deb_sha256(deb_path: Path, *, sha256_url: str | None, deb_name: str) -> str | None:
+    """Return an error message if verification fails; None on success / no sums published."""
+    if not sha256_url:
+        logger.warning("Kein SHA256SUMS-Asset — Update ohne Hash-Prüfung")
+        return None
+    try:
+        request = urllib.request.Request(sha256_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            sums = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        return f"SHA256SUMS konnte nicht geladen werden: {exc}"
+    expected = _expected_sha256_from_sums(sums, deb_name)
+    if not expected:
+        return f"SHA256SUMS enthält keinen Eintrag für {deb_name}"
+    actual = _file_sha256(deb_path)
+    if actual != expected:
+        return f"SHA256-Mismatch: erwartet {expected}, erhalten {actual}"
+    return None
+
+
 def download_update(progress_cb: Any | None = None) -> dict[str, Any]:
     status = get_status()
     if not status.get("available") or not status.get("deb_url") or not status.get("deb_name"):
         return _set_state(phase="error", error="Kein Update zum Herunterladen")
     deb_name = str(status["deb_name"])
     deb_url = str(status["deb_url"])
+    sha256_url = status.get("sha256_url")
     dest = _cache_dir() / deb_name
     _set_state(phase="downloading", download_percent=0, error=None, download_path=None)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -222,6 +272,10 @@ def download_update(progress_cb: Any | None = None) -> dict[str, Any]:
                     if progress_cb:
                         progress_cb(percent)
         tmp.replace(dest)
+        verify_error = verify_deb_sha256(dest, sha256_url=str(sha256_url) if sha256_url else None, deb_name=deb_name)
+        if verify_error:
+            dest.unlink(missing_ok=True)
+            return _set_state(phase="error", error=verify_error, download_path=None)
         return _set_state(phase="downloaded", download_path=str(dest), download_percent=100, error=None)
     except Exception as exc:
         logger.warning("Update-Download fehlgeschlagen: %s", exc)

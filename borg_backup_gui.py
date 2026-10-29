@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Borg Backup GUI - Komplettes Backup-Management mit Borg und Storage Box (SSH).
-Funktioniert als root für vollständige Systemsicherungen.
+Borg Backup GUI - Desktop-Oberfläche für den Backup-Dienst borg-backup-guid.
+
+Die GUI läuft als normaler Benutzer. Backups, Wiederherstellungen und Zeitpläne
+führt der root-Systemdienst aus; die GUI steuert ihn über einen Unix-Socket (polkit).
 """
 
-__version__ = "2.0.4"
+__version__ = "3.0.0-rc1"
 
 import datetime
 import fcntl
@@ -23,20 +25,24 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+for _vendor in (Path(__file__).resolve().parent / "vendor", Path("/usr/lib/borg-backup-gui/vendor")):
+    if _vendor.is_dir() and str(_vendor) not in sys.path:
+        sys.path.append(str(_vendor))
+
+import borg_ipc
+from borg_ipc import IpcClient, IpcError
 from borg_model import (
     account_summary,
     account_usage_count,
-    build_borg_env,
     compute_next_run,
     destinations_for_job,
     enrich_source,
     ensure_sources,
-    filter_available_includes,
     find_schedule_overlaps,
-    flatten_source_excludes,
     format_schedule_summary,
     format_size,
     get_account,
+    get_destination,
     get_job,
     list_backup_mounts,
     list_backup_volumes,
@@ -52,14 +58,22 @@ from borg_model import (
     sync_profiles_mirror,
     sync_sources_to_flat,
 )
+from borg_sysconfig import (
+    assign_legacy_ssh_ports,
+    config_fingerprint,
+    extract_system_config,
+    has_plain_secrets,
+    mask_secrets,
+    strip_user_secrets,
+)
 
 try:
-    import pystray
     from PIL import Image, ImageDraw
 except Exception:
     Image = None  # type: ignore[assignment]
     ImageDraw = None  # type: ignore[assignment]
-    pystray = None
+
+pystray = None  # Tray exclusively via Ayatana AppIndicator (no pystray dependency)
 
 try:
     from PIL import ImageTk
@@ -94,10 +108,16 @@ INSTANCE_SOCKET_FILE = CONFIG_DIR / "instance.sock"
 PROTOCOL_DIR = CONFIG_DIR / "protokolle"
 ASSET_ICON_FILE = Path(__file__).resolve().parent / "assets" / "borg-backup-gui.svg"
 DEFAULT_STORAGE = "uXXXXXX@uXXXXXX.your-storagebox.de:./backup"
-BORG_BIN = shutil.which("borg") or "borg"
 INSTANCE_LOCK_HANDLE = None
-
-CANARY_FILE = "/var/tmp/borg-canary-check.txt"
+SERVICE_NAME = "borg-backup-guid"
+CANARY_FILE = "/var/lib/borg-backup-gui/canary-check.txt"
+RESTORE_DOC_PATHS = (
+    Path("/usr/share/doc/borg-backup-gui/RESTORE.md"),
+    Path(__file__).resolve().parent / "docs" / "RESTORE.md",
+)
+AUTOSTART_DIR = Path.home() / ".config" / "autostart"
+AUTOSTART_FILE = AUTOSTART_DIR / "borg-backup-gui.desktop"
+SYSTEM_AUTOSTART_FILE = Path("/etc/xdg/autostart/borg-backup-gui.desktop")
 
 # Live-Log darf nicht unbegrenzt wachsen (Tk-Text hält sonst GB im RAM).
 LOG_MAX_LINES = 2000
@@ -154,128 +174,12 @@ def _activate_existing_instance():
 
 
 # ============================================================
-# HELFERKLASSE FUER LIVE-OUTPUT
-# ============================================================
-class CommandRunner:
-    """Führt Befehle im Thread aus und liefert Logs thread-sicher an die GUI."""
-
-    def __init__(self, append_callback, schedule_main):
-        self.append_callback = append_callback
-        self.schedule_main = schedule_main
-        self.process = None
-        self.stop_flag = False
-
-    def append_log(self, text):
-        self.append_callback(text)
-
-    def run(self, cmd, done_callback=None, env=None, cwd=None):
-        """Befehl in Hintergrund-Thread starten."""
-
-        def target():
-            result = {"exit_code": -1, "stopped": False, "exception": ""}
-            try:
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True,
-                    env=env if env else os.environ,
-                    cwd=cwd,
-                )
-
-                buf = ""
-                while True:
-                    if self.stop_flag:
-                        self.process.terminate()
-                        result["stopped"] = True
-                        break
-                    # Chunks statt Zeichen: weniger Overhead, gleiche \r-Progress-Unterstützung
-                    chunk = self.process.stdout.read(4096)
-                    if not chunk:
-                        if buf.strip():
-                            self.append_log(buf + "\n")
-                        break
-                    buf += chunk
-                    while True:
-                        nl = buf.find("\n")
-                        cr = buf.find("\r")
-                        if nl < 0 and cr < 0:
-                            break
-                        if nl < 0 or (cr >= 0 and cr < nl):
-                            line, buf = buf[:cr], buf[cr + 1 :]
-                        else:
-                            line, buf = buf[:nl], buf[nl + 1 :]
-                        if line.strip():
-                            self.append_log(line + "\n")
-
-                exit_code = self.process.wait()
-                result["exit_code"] = exit_code
-
-                if exit_code == 1 and not self.stop_flag:
-                    self.append_log(f"\n[WARNUNG] Befehl endete mit Code {exit_code}\n")
-                elif exit_code != 0 and not self.stop_flag:
-                    self.append_log(f"\n[FEHLER] Befehl endete mit Code {exit_code}\n")
-                elif exit_code == 0:
-                    self.append_log("\n[OK] Fertig!\n")
-            except Exception as exc:
-                result["exception"] = str(exc)
-                self.append_log(f"\n[EXCEPTION] {exc}\n")
-            finally:
-                if done_callback:
-                    self.schedule_main(lambda: done_callback(result))
-
-        thread = threading.Thread(target=target, daemon=True)
-        thread.start()
-        return thread
-
-    def run_capture(self, cmd, done_callback=None, env=None, cwd=None, timeout=120):
-        """Befehl in Hintergrund-Thread starten, stdout/stderr sammeln, kein Live-Log."""
-
-        def target():
-            result = {"exit_code": -1, "stopped": False, "exception": "", "stdout": "", "stderr": ""}
-            try:
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    env=env if env else os.environ,
-                    cwd=cwd,
-                )
-                try:
-                    out, err = self.process.communicate(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.communicate()
-                    result["exception"] = f"Zeitüberschreitung nach {timeout}s – Server nicht erreichbar?"
-                    return
-                result["stdout"] = out
-                result["stderr"] = err
-                result["exit_code"] = self.process.returncode
-            except Exception as exc:
-                result["exception"] = str(exc)
-            finally:
-                if done_callback:
-                    self.schedule_main(lambda: done_callback(result))
-
-        thread = threading.Thread(target=target, daemon=True)
-        thread.start()
-        return thread
-
-    def stop(self):
-        self.stop_flag = True
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-
-
-# ============================================================
 # HAUPT-GUI-KLASSE
 # ============================================================
 class BorgBackupGUI:
-    def __init__(self, master):
+    def __init__(self, master, start_hidden: bool = False):
         self.master = master
+        self.start_hidden = start_hidden
         try:
             master.tk.call("tk", "appname", "BorgBackupGUI")
         except Exception:
@@ -419,10 +323,21 @@ class BorgBackupGUI:
         self.status_data = self._load_status()
         self.archive_sizes_cache = self._load_archive_sizes_cache()
 
-        self.runner = None
-        self.restore_runner = None
         self.log_widget = None
         self.restore_log = None
+        self.ipc = IpcClient(timeout=30)
+        self.ipc_slow = IpcClient(timeout=900)
+        self.ipc_stop = threading.Event()
+        self.daemon_online = False
+        self.daemon_error = ""
+        self.daemon_status: dict = {}
+        self.daemon_fingerprint: str | None = None
+        self.daemon_busy = False
+        self._config_synced = False
+        self._config_push_running = False
+        self._config_push_again = False
+        self._seen_finished_ids: set[str] = set()
+        self.current_restore_id: str | None = None
 
         self.log_queue = queue.Queue()
         self.scheduled_job_id = None
@@ -431,21 +346,21 @@ class BorgBackupGUI:
         self._schedule_volume_loading = False
         self._schedule_volume_prev = self.config_data.get("profile_name", "Standard")
         self.backup_running = False
-        self.current_backup_job_name = None
-        self.current_backup_started_at = None
+        self.current_backup_job_name: str | None = None
+        self.current_backup_started_at: datetime.datetime | None = None
         self.backup_files_seen = 0
         self.backup_last_item = ""
         self.backup_list_log_counter = 0
         self._dashboard_last_update_at = 0.0
-        self.backup_task_queue = []
-        self.backup_current_task = None
+        self.backup_task_queue: list = []
+        self.backup_current_task: dict | None = None
         self.archive_list_refresh_pending = False
         self.tray_icon = None
         self.native_indicator = None
         self.native_indicator_thread = None
-        self.native_indicator_supported = bool(AyatanaAppIndicator3 and Gtk)
+        self.native_indicator_supported = bool(AyatanaAppIndicator3 and Gtk and GLib)
         self.native_indicator_failed = False
-        self.tray_supported = bool(pystray and Image and ImageDraw)
+        self.tray_supported = bool(self.native_indicator_supported and Image and ImageDraw)
         self.is_root = os.geteuid() == 0
         self.tray_runtime_available = self.tray_supported and not self.is_root
         self.tray_hint_shown = False
@@ -486,15 +401,33 @@ class BorgBackupGUI:
         )
         self.notice_label.pack(side="left", fill="x", expand=True)
 
+        self.daemon_banner = tk.Frame(master, bg="#7f1d1d")
+        self.daemon_banner_var = tk.StringVar(value="")
+        tk.Label(
+            self.daemon_banner,
+            textvariable=self.daemon_banner_var,
+            bg="#7f1d1d",
+            fg="#fee2e2",
+            anchor="w",
+            justify="left",
+            padx=12,
+            pady=8,
+            wraplength=820,
+        ).pack(side="left", fill="x", expand=True)
+        self.daemon_start_btn = ttk.Button(
+            self.daemon_banner, text="Dienst starten", command=self._start_daemon_service
+        )
+        self.daemon_start_btn.pack(side="right", padx=10, pady=6)
+
         self.notebook = ttk.Notebook(master)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
         self.tab_dashboard = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_dashboard, text="Dashboard")
+        self.notebook.add(self.tab_dashboard, text="Übersicht")
         self._build_dashboard_tab()
 
         self.tab_backup = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_backup, text="Backup")
+        self.notebook.add(self.tab_backup, text="Sicherung")
         self._build_backup_tab()
 
         self.tab_archive = ttk.Frame(self.notebook)
@@ -502,7 +435,7 @@ class BorgBackupGUI:
         self._build_archive_tab()
 
         self.tab_restore = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_restore, text="Restore")
+        self.notebook.add(self.tab_restore, text="Wiederherstellung")
         self._build_restore_tab()
 
         self.tab_schedule = ttk.Frame(self.notebook)
@@ -510,27 +443,17 @@ class BorgBackupGUI:
         self._build_schedule_tab()
 
         self.tab_accounts = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_accounts, text="Accounts")
+        self.notebook.add(self.tab_accounts, text="Konten")
         self._build_accounts_tab()
 
         self.tab_protocol = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_protocol, text="Protokoll")
+        self.notebook.add(self.tab_protocol, text="Protokolle")
         self._build_protocol_tab()
-
-        self.runner = CommandRunner(
-            append_callback=self._append_backup_log, schedule_main=lambda cb: self.master.after(0, cb)
-        )
-        self.restore_runner = CommandRunner(
-            append_callback=self._append_restore_log, schedule_main=lambda cb: self.master.after(0, cb)
-        )
-        self.archive_runner = CommandRunner(
-            append_callback=self._append_backup_log, schedule_main=lambda cb: self.master.after(0, cb)
-        )
 
         self.master.after(100, self._process_log_queue)
         self._schedule_next_backup()
         self._update_dashboard_status()
-        self.master.after(1200, self._refresh_dashboard_status)
+        self.master.after(150, self._start_daemon_subscription)
         # Tray leicht verzögert starten, damit Tk/DBus/Panel stabil initialisiert sind.
         self.master.after(700, self._setup_tray_icon)
         self.master.after(8000, self._idle_archive_preload)
@@ -549,25 +472,26 @@ class BorgBackupGUI:
         self.master.bind("<<StartBackup>>", lambda e: self._start_backup())
         self.master.bind("<<TrayBackupToggle>>", lambda e: self._tray_backup_toggle())
         self.master.bind("<<QuitApp>>", lambda e: self._quit_app())
-        self.master.after(120, self._ensure_window_visible)
+        if self.start_hidden and self.tray_runtime_available and self.config_data.get("tray_enabled", True):
+            self.master.withdraw()
+            self.master.after(8000, self._ensure_window_visible_if_tray_dead)
+        else:
+            self.master.after(120, self._ensure_window_visible)
         self.master.after(30000, self._periodic_tray_health_check)
         # Profil-Dropdown initialisieren
         self.master.after(500, self._refresh_profile_combo)
         self.master.after(600, self._refresh_archive_profile_combo)
         self.master.after(800, self._ensure_protocol_dir)
         self.master.after(1500, self._purge_old_protocol_pdfs)
-        self.master.after(900, self._maybe_show_first_run_wizard)
         self.master.after(10000, self._auto_check_app_update)
-        self.backup_dest_results: list = []
-        self._multi_dest_queue: list = []
-        self._current_dest_meta = None
         self._update_prompt_pending = False
 
         if os.geteuid() == 0:
             messagebox.showwarning(
                 "Hinweis",
-                "Die GUI sollte als normaler User laufen, damit das Tray-Symbol sichtbar bleibt.\n\n"
-                "Root-Rechte werden bei Borg-Befehlen automatisch angefordert.",
+                "Die GUI sollte als normaler Benutzer laufen.\n\n"
+                "Backups führt der Systemdienst borg-backup-guid mit root-Rechten aus; "
+                "die Oberfläche selbst braucht keine root-Rechte.",
             )
 
     def _on_close(self):
@@ -663,10 +587,15 @@ class BorgBackupGUI:
         data.setdefault("maintain_all_destinations", False)
         data.setdefault("auto_update_check", True)
         # Existing installs with a destination: don't force the first-run wizard again
+        configured = bool(
+            (data.get("storage") and "uXXXXXX" not in str(data.get("storage")))
+            or data.get("local_path")
+            or data.get("accounts")
+        )
         if "setup_complete" not in data:
-            data["setup_complete"] = bool(data.get("storage") or data.get("local_path") or data.get("accounts"))
+            data["setup_complete"] = configured
         if "repo_access_confirmed" not in data:
-            data["repo_access_confirmed"] = bool(data.get("storage") or data.get("local_path") or data.get("accounts"))
+            data["repo_access_confirmed"] = configured
         data = migrate_profiles_to_model(data)
         ensure_sources(data)
         return data
@@ -806,54 +735,529 @@ class BorgBackupGUI:
         if hasattr(self, "auto_update_var"):
             self.config_data["auto_update_check"] = bool(self.auto_update_var.get())
 
-    def _save_config(self):
+    def _save_config(self, push: bool = True):
         try:
             self._collect_config_from_ui()
-            # Aktuelles Profil in der Liste aktualisieren
-            if hasattr(self, "_update_current_profile_in_list"):
-                self._update_current_profile_in_list()
             if hasattr(self, "_sync_active_job_from_ui"):
                 self._sync_active_job_from_ui()
+            self._sync_flat_fields_to_model()
             sync_profiles_mirror(self.config_data)
-            self._dedupe_flat_secrets_into_accounts()
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(CONFIG_FILE, "w") as file_handle:
-                json.dump(self.config_data, file_handle, indent=4)
-            try:
-                os.chmod(CONFIG_FILE, 0o600)
-            except OSError:
-                pass
+            self._write_user_config()
         except Exception as exc:
             messagebox.showerror("Fehler", f"Konnte Konfiguration nicht speichern: {exc}")
-
-    def _dedupe_flat_secrets_into_accounts(self) -> None:
-        """Keep accounts[] as secret source of truth; blank redundant flat copies when mirrored."""
-        accounts = self.config_data.get("accounts") or []
-        if not accounts:
             return
-        # Prefer first account matching active profile type for passphrase / S3 keys.
-        ptype = self.config_data.get("profile_type", "ssh")
-        primary = next((a for a in accounts if a.get("type") == ptype), accounts[0])
-        if self.config_data.get("borg_passphrase") and not primary.get("passphrase"):
-            primary["passphrase"] = self.config_data.get("borg_passphrase", "")
-        if ptype == "s3":
-            if self.config_data.get("s3_access_key") and not primary.get("s3_access_key"):
-                primary["s3_access_key"] = self.config_data.get("s3_access_key", "")
-            if self.config_data.get("s3_secret_key") and not primary.get("s3_secret_key"):
-                primary["s3_secret_key"] = self.config_data.get("s3_secret_key", "")
-        # profiles[] mirror may still hold copies for migration; accounts remain authoritative.
+        if push:
+            self._push_config_if_changed()
+
+    def _write_user_config(self) -> None:
+        """Persist GUI settings; once the service owns the config, secrets never touch ~/.config."""
+        data = self.config_data
+        if data.get("migrated_to_system"):
+            data = strip_user_secrets(data)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_FILE.with_suffix(".json.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as file_handle:
+            json.dump(data, file_handle, indent=4)
+        os.replace(tmp, CONFIG_FILE)
+
+    FLAT_ACCOUNT_FIELDS = {
+        "ssh_key": "ssh_key",
+        "borg_passphrase": "passphrase",
+        "s3_access_key": "s3_access_key",
+        "s3_secret_key": "s3_secret_key",
+        "s3_endpoint_url": "s3_endpoint_url",
+        "s3_region": "s3_region",
+    }
+
+    def _primary_dest_and_account(self, job=None):
+        job = job or self._active_job()
+        if not job:
+            return None, None
+        dest_ids = list(job.get("destination_ids") or [])
+        dest = get_destination(self.config_data, str(dest_ids[0])) if dest_ids else None
+        if dest is None:
+            return None, None
+        return dest, get_account(self.config_data, str(dest.get("account_id") or ""))
+
+    def _take_flat_snapshot(self) -> None:
+        keys = ("storage", "local_path", *self.FLAT_ACCOUNT_FIELDS)
+        self._flat_snapshot = {key: self.config_data.get(key, "") for key in keys}
+
+    def _sync_flat_fields_to_model(self) -> None:
+        """Write edited flat fields (Sicherung-Tab) into the active volume's primary target/account.
+
+        Only fields the user changed since the last load are written, so edits made in the
+        Konten tab are not overwritten by stale flat values.
+        """
+        snapshot = getattr(self, "_flat_snapshot", None)
+        dest, account = self._primary_dest_and_account()
+        if snapshot is None or dest is None or account is None:
+            self._take_flat_snapshot()
+            return
+
+        def changed(key: str) -> bool:
+            return self.config_data.get(key, "") != snapshot.get(key, "")
+
+        if account.get("type") == "local":
+            if changed("local_path") or changed("storage"):
+                path = str(self.config_data.get("local_path") or self.config_data.get("storage") or "").strip()
+                dest["storage"] = path
+                dest["local_path"] = path
+        elif changed("storage"):
+            dest["storage"] = str(self.config_data.get("storage") or "").strip()
+        for flat_key, account_key in self.FLAT_ACCOUNT_FIELDS.items():
+            if changed(flat_key):
+                account[account_key] = self.config_data.get(flat_key, "")
+        self._take_flat_snapshot()
 
     def _save_status(self):
-        try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(STATUS_FILE, "w") as file_handle:
-                json.dump(self.status_data, file_handle, indent=4)
+        """Status is owned by the service (/var/lib/borg-backup-gui); nothing to persist here."""
+
+    # ============================================================
+    # SYSTEMDIENST (borg-backup-guid)
+    # ============================================================
+    def _start_daemon_subscription(self) -> None:
+        def on_event(event, data):
+            self.master.after(0, lambda: self._on_daemon_event(event, data))
+
+        def on_state(ok, message):
+            self.master.after(0, lambda: self._set_daemon_online(ok, message))
+
+        threading.Thread(
+            target=borg_ipc.subscribe_forever,
+            args=(on_event, self.ipc_stop),
+            kwargs={"on_state": on_state},
+            name="daemon-events",
+            daemon=True,
+        ).start()
+        self.master.after(4000, self._check_daemon_reachable)
+
+    def _check_daemon_reachable(self) -> None:
+        if not self.daemon_online:
+            self._set_daemon_online(False, self.daemon_error or "keine Verbindung")
+
+    def _set_daemon_online(self, ok: bool, message: str = "") -> None:
+        was_online = self.daemon_online
+        self.daemon_online = ok
+        self.daemon_error = "" if ok else message
+        if ok:
+            if self.daemon_banner.winfo_manager():
+                self.daemon_banner.pack_forget()
+            if not was_online:
+                self._refresh_daemon_status()
+                if not self._config_synced:
+                    self._initial_config_sync()
+            return
+        socket_exists = os.path.exists(borg_ipc.DEFAULT_SOCKET)
+        if "Authentifizierung" in message or "autorisiert" in message:
+            text = f"Keine Berechtigung für den Backup-Dienst: {message}"
+        elif socket_exists:
+            text = f"Backup-Dienst antwortet nicht ({message})."
+        else:
+            text = (
+                f"Der Backup-Dienst {SERVICE_NAME} läuft nicht. Ohne ihn finden keine Backups statt — "
+                "auch keine geplanten."
+            )
+        self.daemon_banner_var.set(text)
+        if not self.daemon_banner.winfo_manager():
+            self.daemon_banner.pack(fill="x", side="top", before=self.notebook)
+        if was_online:
+            self.backup_running = False
+            self.daemon_busy = False
+            self._update_action_buttons()
+            self._update_dashboard_status(force=True)
+
+    def _start_daemon_service(self) -> None:
+        def worker():
             try:
-                os.chmod(STATUS_FILE, 0o600)
-            except OSError:
-                pass
-        except Exception as exc:
-            messagebox.showerror("Fehler", f"Konnte Status nicht speichern: {exc}")
+                proc = subprocess.run(
+                    ["pkexec", "systemctl", "enable", "--now", SERVICE_NAME],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                ok, err = proc.returncode == 0, (proc.stderr or proc.stdout).strip()
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                ok, err = False, str(exc)
+            self.master.after(0, lambda: self._on_daemon_service_started(ok, err))
+
+        self.daemon_start_btn.state(["disabled"])
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_daemon_service_started(self, ok: bool, err: str) -> None:
+        self.daemon_start_btn.state(["!disabled"])
+        if ok:
+            self._show_notice("Backup-Dienst gestartet.", level="success")
+        else:
+            self._show_notice(f"Dienst konnte nicht gestartet werden: {err or 'abgebrochen'}", level="error")
+
+    def _daemon_call_async(self, method, params=None, on_done=None, *, slow=False):
+        """Call the service in a worker thread; ``on_done(result, error)`` runs in the Tk thread."""
+        client = self.ipc_slow if slow else self.ipc
+
+        def worker():
+            try:
+                result, error = client.call(method, params or {}), None
+            except IpcError as exc:
+                result, error = None, exc
+            except Exception as exc:
+                result, error = None, IpcError("internal", str(exc))
+            if on_done is not None:
+                self.master.after(0, lambda: on_done(result, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_daemon_status(self) -> None:
+        def done(result, error):
+            if error is None and isinstance(result, dict):
+                self._apply_daemon_status(result)
+
+        self._daemon_call_async("get_status", on_done=done)
+
+    def _on_daemon_event(self, event: str, data) -> None:
+        if event == "status" and isinstance(data, dict):
+            self._apply_daemon_status(data)
+        elif event == "log" and isinstance(data, dict):
+            channel = "restore" if data.get("channel") == "restore" else "backup"
+            self.log_queue.put((channel, str(data.get("text", "")) + "\n"))
+        elif event == "progress" and isinstance(data, dict):
+            current = self.daemon_status.get("current") or {}
+            channel = "restore" if current.get("kind") == "extract" else "backup"
+            if channel == "backup":
+                self.log_queue.put(("backup", str(data.get("line", "")) + "\n"))
+            else:
+                self._update_restore_progress(current)
+        elif event == "job_finished" and isinstance(data, dict):
+            self._on_daemon_job_finished(data)
+
+    def _apply_daemon_status(self, snap: dict) -> None:
+        self.daemon_status = snap
+        current = snap.get("current") or None
+        was_running = self.backup_running
+        self.daemon_busy = current is not None
+        self.backup_running = bool(current and current.get("kind") == "backup")
+        if self.backup_running and isinstance(current, dict):
+            self.current_backup_job_name = str(current.get("job") or "")
+            self.current_backup_started_at = self._parse_iso_time(str(current.get("started_at") or ""))
+            self.backup_current_task = {"label": current.get("task_label", "")}
+            stats = current.get("stats") or {}
+            self.status_data["last_files_count"] = stats.get("files_count") or 0
+            self.status_data["last_source_size"] = stats.get("source_size") or ""
+            self.status_data["last_dedupe_size"] = stats.get("dedupe_size") or ""
+            self.status_data["last_item"] = stats.get("last_item") or ""
+            if not was_running:
+                self._reset_backup_progress()
+        else:
+            self.current_backup_job_name = None
+            self.current_backup_started_at = None
+            self.backup_current_task = None
+            last = snap.get("last") or {}
+            for key, value in last.items():
+                if key.startswith("canary_"):
+                    self.config_data[key] = value or ""
+                elif key not in ("job", "archive", "trigger"):
+                    self.status_data[key] = value
+        self.status_data["jobs"] = snap.get("jobs") or {}
+
+        next_runs = []
+        for name, entry in (snap.get("jobs") or {}).items():
+            when = self._parse_iso_time(str((entry or {}).get("next_run_at") or ""))
+            if when:
+                next_runs.append((name, when))
+        if next_runs:
+            self.next_scheduled_job_name, self.next_backup_dt = min(next_runs, key=lambda item: item[1])
+        else:
+            self.next_scheduled_job_name, self.next_backup_dt = None, None
+
+        self._sync_mount_state(snap.get("mounts") or [])
+        self._update_restore_progress(current if current and current.get("kind") == "extract" else None)
+        self._update_action_buttons()
+        self._refresh_schedule_overview()
+        self._update_dashboard_status(force=True)
+        self._schedule_tray_live_refresh(1000)
+
+        fingerprint = snap.get("config_fingerprint")
+        if (
+            self._config_synced
+            and fingerprint
+            and self.daemon_fingerprint
+            and fingerprint != self.daemon_fingerprint
+            and not self._config_push_running
+        ):
+            self._reload_config_from_daemon()
+
+    def _update_action_buttons(self) -> None:
+        running = self.backup_running
+        if hasattr(self, "backup_btn"):
+            self.backup_btn.config(state="disabled" if running or not self.daemon_online else "normal")
+        if hasattr(self, "stop_btn"):
+            self.stop_btn.config(state="normal" if running else "disabled")
+        if hasattr(self, "restore_start_btn"):
+            restoring = bool((self.daemon_status.get("current") or {}).get("kind") == "extract")
+            self.restore_start_btn.config(state="disabled" if restoring or not self.daemon_online else "normal")
+            self.restore_cancel_btn.config(state="normal" if restoring else "disabled")
+
+    def _on_daemon_job_finished(self, data: dict) -> None:
+        item_id = str(data.get("id") or "")
+        if item_id in self._seen_finished_ids:
+            return
+        self._seen_finished_ids.add(item_id)
+        kind = data.get("kind")
+        if kind == "backup":
+            self._on_backup_finished(data.get("job") or "", data.get("status") or {})
+        elif kind == "extract":
+            info = data.get("status") or {}
+            self.current_restore_id = None
+            if info.get("ok"):
+                text = f"Wiederherstellung von {info.get('archive')} nach {info.get('target')} abgeschlossen."
+                self._append_restore_log(f"\n[OK] {text}\n")
+                self._show_notice(text, level="success", timeout_ms=12000)
+            else:
+                text = f"Wiederherstellung fehlgeschlagen: {info.get('error') or info.get('exit_code')}"
+                self._append_restore_log(f"\n[FEHLER] {text}\n")
+                self._show_notice(text, level="error", timeout_ms=15000)
+        elif kind == "delete":
+            if data.get("ok"):
+                self._show_notice(f"Archiv {data.get('archive')} gelöscht.", level="success")
+                self.archive_cache.pop(self.config_data.get("profile_name", "Standard"), None)
+                self._load_archive_list()
+            else:
+                self._show_notice(f"Löschen fehlgeschlagen: {data.get('error')}", level="error", timeout_ms=12000)
+        elif kind == "init":
+            if data.get("ok"):
+                self._show_notice("Repository initialisiert.", level="success")
+            else:
+                self._show_notice(
+                    f"Initialisierung fehlgeschlagen: {data.get('error')}", level="error", timeout_ms=15000
+                )
+
+    def _on_backup_finished(self, job_name: str, status: dict) -> None:
+        exit_code = status.get("last_exit_code")
+        error = str(status.get("last_error") or "")
+        succeeded = bool(status.get("last_success_at")) and status.get("last_run_at", "") <= status.get(
+            "last_success_at", ""
+        )
+        if succeeded and exit_code in (0, 1) and not error:
+            self._show_notice(f"Backup „{job_name}“ erfolgreich beendet.", level="success", timeout_ms=10000)
+        elif succeeded:
+            self._show_notice(f"Backup „{job_name}“: {error}", level="warning", timeout_ms=14000)
+        else:
+            self._show_notice(f"Backup „{job_name}“ nicht erfolgreich: {error}", level="error", timeout_ms=15000)
+        auto_pdf = getattr(self, "protocol_auto_var", None)
+        if succeeded and auto_pdf is not None and auto_pdf.get():
+            self.master.after(1500, lambda: self._generate_pdf_report(auto_generated=True))
+        self._refresh_archive_cache()
+
+    # --------------------------------------------------------- Konfiguration
+    def _system_config_payload(self) -> dict:
+        return extract_system_config(self.config_data)
+
+    def _push_config_if_changed(self, on_done=None, force: bool = False) -> None:
+        """Send the volume/target config to the service if it differs (polkit: configure)."""
+        callbacks = getattr(self, "_push_callbacks", [])
+        self._push_callbacks = callbacks
+        if not self.daemon_online or not self._config_synced:
+            if on_done:
+                on_done(False, "Backup-Dienst nicht verbunden.")
+            return
+        payload = self._system_config_payload()
+        if (
+            not force
+            and config_fingerprint(mask_secrets(payload)) == self.daemon_fingerprint
+            and not has_plain_secrets(payload)
+        ):
+            if on_done:
+                on_done(True, "")
+            return
+        if on_done:
+            callbacks.append(on_done)
+        if self._config_push_running:
+            self._config_push_again = True
+            return
+        self._config_push_running = True
+        self._daemon_call_async("save_config", {"config": payload}, on_done=self._on_config_pushed, slow=True)
+
+    def _on_config_pushed(self, result, error) -> None:
+        self._config_push_running = False
+        callbacks, self._push_callbacks = list(getattr(self, "_push_callbacks", [])), []
+        if error is None and isinstance(result, dict):
+            self.daemon_fingerprint = result.get("fingerprint")
+            self._adopt_system_config(result.get("config") or {}, reapply_profile=False)
+            self._write_user_config()
+            ok, message = True, ""
+        else:
+            ok = False
+            message = error.message if error else "Unbekannter Fehler"
+            if error is not None and error.code == "invalid":
+                messagebox.showerror("Konfiguration ungültig", message)
+            elif error is not None and error.code == "unauthorized":
+                self._show_notice(
+                    "Änderungen nicht an den Backup-Dienst übertragen: Authentifizierung abgebrochen.",
+                    level="warning",
+                    timeout_ms=12000,
+                )
+            else:
+                self._show_notice(f"Konfiguration nicht übertragen: {message}", level="error", timeout_ms=12000)
+        for callback in callbacks:
+            callback(ok, message)
+        if self._config_push_again:
+            self._config_push_again = False
+            self._push_config_if_changed()
+
+    def _adopt_system_config(self, cfg: dict, *, reapply_profile: bool = True) -> None:
+        """Take accounts/targets/volumes from the service (masked secrets) as source of truth."""
+        if not cfg:
+            return
+        gui_sources = {
+            str(job.get("name")): job.get("sources") for job in self.config_data.get("jobs") or [] if job.get("sources")
+        }
+        jobs = []
+        for job in cfg.get("jobs") or []:
+            job = dict(job)
+            previous = {str(s.get("path")): s for s in gui_sources.get(job["name"]) or [] if isinstance(s, dict)}
+            job["sources"] = [{**previous.get(src["path"], {}), **src} for src in job.get("sources") or []]
+            jobs.append(job)
+        self.config_data["accounts"] = list(cfg.get("accounts") or [])
+        self.config_data["destinations"] = list(cfg.get("destinations") or [])
+        self.config_data["jobs"] = jobs
+        for key in ("canary_enabled", "repo_access_confirmed", "maintain_all_destinations"):
+            if key in cfg:
+                self.config_data[key] = bool(cfg[key])
+        if jobs:
+            self.config_data["setup_complete"] = True
+        sync_profiles_mirror(self.config_data)
+        active = self.config_data.get("profile_name")
+        names = [j["name"] for j in jobs]
+        if names and (reapply_profile or active not in names):
+            self._apply_profile(active if active in names else names[0])
+        else:
+            dest, account = self._primary_dest_and_account()
+            if account is not None:
+                for flat_key, account_key in self.FLAT_ACCOUNT_FIELDS.items():
+                    self.config_data[flat_key] = account.get(account_key, "")
+                if dest is not None:
+                    self.config_data["storage"] = dest.get("storage", "")
+                    self.config_data["local_path"] = dest.get("local_path", "")
+                self._sync_config_to_ui()
+                self._take_flat_snapshot()
+        if hasattr(self, "maintain_all_dest_var"):
+            self.maintain_all_dest_var.set(bool(self.config_data.get("maintain_all_destinations")))
+        self._refresh_accounts_tree()
+        self._refresh_destinations_tree()
+        self._refresh_schedule_volume_combo()
+        self._refresh_archive_profile_combo()
+        self._refresh_restore_job_combo()
+
+    def _reload_config_from_daemon(self) -> None:
+        def done(result, error):
+            if error is None and isinstance(result, dict):
+                self.daemon_fingerprint = result.get("fingerprint")
+                self._adopt_system_config(result.get("config") or {})
+                self._write_user_config()
+
+        self._daemon_call_async("get_config", on_done=done)
+
+    def _has_legacy_setup(self) -> bool:
+        if self.config_data.get("migrated_to_system") or not self.config_data.get("setup_complete"):
+            return False
+        for dest in self.config_data.get("destinations") or []:
+            repo = str(dest.get("storage") or dest.get("local_path") or "")
+            if repo and "uXXXXXX" not in repo:
+                return True
+        return False
+
+    def _initial_config_sync(self) -> None:
+        def done(result, error):
+            if error is not None or not isinstance(result, dict):
+                self._show_notice(
+                    f"Konfiguration des Dienstes nicht lesbar: {error.message if error else '?'}", level="error"
+                )
+                return
+            daemon_cfg = result.get("config") or {}
+            if not daemon_cfg.get("jobs"):
+                if self._has_legacy_setup():
+                    self._offer_legacy_import()
+                    return
+                self.daemon_fingerprint = result.get("fingerprint")
+                self._config_synced = True
+                self.config_data["migrated_to_system"] = True
+                if not self.config_data.get("setup_complete"):
+                    self._show_first_run_wizard()
+                else:
+                    self._push_config_if_changed()
+                return
+            self.daemon_fingerprint = result.get("fingerprint")
+            self._config_synced = True
+            self.config_data["migrated_to_system"] = True
+            self._adopt_system_config(daemon_cfg)
+            self._write_user_config()
+
+        self._daemon_call_async("get_config", on_done=done)
+
+    def _offer_legacy_import(self) -> None:
+        names = ", ".join(str(j.get("name")) for j in self.config_data.get("jobs") or [])
+        if not messagebox.askyesno(
+            "Konfiguration übernehmen",
+            "Ab Version 3 führt der Systemdienst borg-backup-guid alle Backups aus.\n\n"
+            f"Sollen die vorhandenen Backup-Volumen ({names}) samt Zielen, SSH-Keys und "
+            "Passphrasen jetzt in den Dienst übernommen werden?\n\n"
+            "• Dafür ist einmalig das Administrator-Passwort nötig.\n"
+            "• Zugangsdaten liegen danach nur noch root-geschützt unter /etc/borg-backup-gui.\n"
+            "• Der Borg-Cache wird beim ersten Lauf neu aufgebaut (dauert einmalig länger).",
+        ):
+            self._show_notice(
+                "Nicht übernommen: Solange der Dienst keine Konfiguration hat, laufen keine Backups.",
+                level="warning",
+                timeout_ms=15000,
+            )
+            return
+        payload = dict(self.config_data)
+        payload["accounts"] = [dict(a) for a in self.config_data.get("accounts") or []]
+        assign_legacy_ssh_ports(payload)
+        legacy_status = {}
+        try:
+            with open(STATUS_FILE, encoding="utf-8") as handle:
+                legacy_status = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        def done(result, error):
+            if error is not None or not isinstance(result, dict):
+                messagebox.showerror(
+                    "Übernahme fehlgeschlagen",
+                    f"{error.message if error else 'Unbekannter Fehler'}\n\n"
+                    "Die bisherige Konfiguration bleibt unverändert. Erneut versuchen über "
+                    "Übersicht → „Mit Dienst synchronisieren“.",
+                )
+                return
+            self.daemon_fingerprint = result.get("fingerprint")
+            self._config_synced = True
+            self.config_data["migrated_to_system"] = True
+            self._adopt_system_config(result.get("config") or {})
+            self._write_user_config()
+            self._show_notice("Konfiguration in den Backup-Dienst übernommen.", level="success", timeout_ms=10000)
+            self._refresh_daemon_status()
+
+        self._daemon_call_async(
+            "import_legacy",
+            {"config": extract_system_config(payload), "status": legacy_status},
+            on_done=done,
+            slow=True,
+        )
+
+    def _manual_daemon_sync(self) -> None:
+        if not self.daemon_online:
+            self._show_notice("Backup-Dienst nicht verbunden.", level="warning")
+            return
+        if self._config_synced:
+            self._save_config(push=False)
+            self._push_config_if_changed(
+                on_done=lambda ok, _m: ok and self._show_notice("Mit dem Dienst synchronisiert.", level="success"),
+                force=True,
+            )
+        else:
+            self._initial_config_sync()
 
     def _build_schedule_tab(self):
         tab = self.tab_schedule
@@ -1116,7 +1520,7 @@ class BorgBackupGUI:
             tray_apply_btn.state(["disabled"])
             ttk.Label(
                 tray_frame,
-                text="Tray ist deaktiviert: Bitte pystray und pillow installieren (pip install pystray pillow).",
+                text="Tray ist deaktiviert: AppIndicator (gir1.2-ayatanaappindicator3) und Pillow werden benötigt.",
                 font=("Arial", 9),
             ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
         elif self.is_root:
@@ -1213,7 +1617,9 @@ class BorgBackupGUI:
                 self.config_data["s3_region"] = p.get("s3_region", "")
                 self.config_data["local_path"] = p.get("local_path", "")
                 self._sync_config_to_ui()
+                self._take_flat_snapshot()
                 self._refresh_profile_combo()
+                self._refresh_destinations_tree()
                 return
 
     def _sync_config_to_ui(self):
@@ -1506,15 +1912,33 @@ class BorgBackupGUI:
         ttk.Button(btn_frame, text="Abbrechen", command=dialog.destroy).pack(side="left", padx=5)
 
         def _save():
-            profile["name"] = name_var.get().strip()
-            profile["type"] = type_var.get()
-            profile["storage"] = storage_var.get().strip()
-            profile["ssh_key"] = ssh_key_var.get().strip()
-            profile["passphrase"] = passphrase_var.get()
-            self._apply_profile(profile["name"])
+            new_name = name_var.get().strip()
+            if not new_name:
+                messagebox.showerror("Fehler", "Bitte einen Namen eingeben.", parent=dialog)
+                return
+            if new_name != name and get_job(self.config_data, new_name):
+                messagebox.showerror("Fehler", "Dieser Name existiert bereits.", parent=dialog)
+                return
+            self._save_config(push=False)
+            job = get_job(self.config_data, name)
+            dest, account = self._primary_dest_and_account(job)
+            if job is not None:
+                job["name"] = new_name
+            if account is not None:
+                account["type"] = type_var.get()
+                account["ssh_key"] = ssh_key_var.get().strip()
+                account["passphrase"] = passphrase_var.get()
+            if dest is not None:
+                dest["storage"] = storage_var.get().strip()
+                if type_var.get() == "local":
+                    dest["local_path"] = dest["storage"]
+            sync_profiles_mirror(self.config_data)
+            self._apply_profile(new_name)
             self._save_config()
+            self._refresh_schedule_volume_combo()
+            self._refresh_archive_profile_combo()
             dialog.destroy()
-            self._show_notice(f'Profil "{profile["name"]}" aktualisiert.', level="success")
+            self._show_notice(f'Profil "{new_name}" aktualisiert.', level="success")
 
         ttk.Button(btn_frame, text="Speichern", command=_save).pack(side="left", padx=5)
         self.master.wait_window(dialog)
@@ -1528,12 +1952,19 @@ class BorgBackupGUI:
             return
         if not messagebox.askyesno("Löschen", f'Profil "{name}" wirklich löschen?'):
             return
-        profiles = [p for p in profiles if p["name"] != name]
-        self.config_data["profiles"] = profiles
-        # Zum ersten Profil wechseln
-        if profiles:
-            self._apply_profile(profiles[0]["name"])
+        self._save_config(push=False)
+        self.config_data["jobs"] = [j for j in self.config_data.get("jobs") or [] if j.get("name") != name]
+        used = {str(d) for j in self.config_data["jobs"] for d in j.get("destination_ids") or []}
+        self.config_data["destinations"] = [
+            d for d in self.config_data.get("destinations") or [] if str(d.get("id")) in used
+        ]
+        sync_profiles_mirror(self.config_data)
+        remaining = self.config_data.get("profiles") or []
+        if remaining:
+            self._apply_profile(remaining[0]["name"])
         self._save_config()
+        self._refresh_schedule_volume_combo()
+        self._refresh_archive_profile_combo()
         self._show_notice(f'Profil "{name}" gelöscht.', level="success")
 
     def _update_backend_fields(self):
@@ -1587,12 +2018,11 @@ class BorgBackupGUI:
                 self._load_archive_list()
 
     def _load_all_profiles_archives(self):
-        """Laedt Archive von allen Profilen und zeigt sie kombiniert an."""
-        profiles = self.config_data.get("profiles", [])
-        if len(profiles) <= 1:
+        """Lädt Archive aller Backup-Volumen über den Dienst und zeigt sie kombiniert an."""
+        jobs = [j for j in self.config_data.get("jobs") or [] if j.get("name")]
+        if len(jobs) <= 1:
             self._load_archive_list()
             return
-
         self._set_archive_loading(True, "Lade Archive aller Profile...")
         self.tree.delete(*self.tree.get_children())
         self.archive_loading_token += 1
@@ -1600,41 +2030,29 @@ class BorgBackupGUI:
 
         def _worker():
             all_archives = []
-            for p in profiles:
-                if token != self.archive_loading_token or self.backup_running:
-                    break
-
-                repo = p.get("storage", "")
-                env = self._borg_env()
-
-                import subprocess as _sp
-
+            errors = []
+            for job in jobs:
+                if token != self.archive_loading_token:
+                    return
                 try:
-                    result = _sp.run(
-                        [BORG_BIN, "list", "--bypass-lock", repo, "--json"],
-                        capture_output=True,
-                        text=True,
-                        env=env,
-                        timeout=60,
-                    )
-                    if result.returncode == 0:
-                        import json as _json
-
-                        data = _json.loads(result.stdout)
-                        for arch in data.get("archives", []):
-                            name = arch.get("name", "?")
-                            time_str = arch.get("time", "?")
-                            all_archives.append((name, time_str, p["name"], p.get("type", "ssh")))
-                except Exception:
-                    pass
+                    result = self.ipc_slow.call("list_archives", {"job": job["name"]})
+                except IpcError as exc:
+                    errors.append(f"{job['name']}: {exc.message}")
+                    continue
+                for arch in result.get("archives") or []:
+                    all_archives.append((arch.get("name") or "?", arch.get("time") or "?", job["name"]))
 
             def _update_ui():
                 if token != self.archive_loading_token:
                     return
-                for name, time_str, pname, ptype in all_archives:
-                    size_hr = self.archive_sizes_cache.get(name, "wird geladen...")
-                    self.tree.insert("", tk.END, text=name, values=(size_hr, time_str, ptype))
-                self._set_archive_loading(False, f"Archivliste geladen: {len(all_archives)} Archive (alle Profile)")
+                for name, time_str, job_name in all_archives:
+                    size_hr = self.archive_sizes_cache.get(name, "—")
+                    self.tree.insert("", tk.END, text=name, values=(size_hr, time_str, job_name))
+                text = f"Archivliste geladen: {len(all_archives)} Archive (alle Profile)"
+                if errors:
+                    text += f" — {len(errors)} Fehler"
+                    self._show_notice("; ".join(errors)[:300], level="warning", timeout_ms=12000)
+                self._set_archive_loading(False, text)
 
             self.master.after(0, _update_ui)
 
@@ -1645,7 +2063,6 @@ class BorgBackupGUI:
         cached = self.archive_cache.get(profile_name, [])
         self.tree.delete(*self.tree.get_children())
         for name, size, time_str, ptype in cached:
-            # Wenn Größe im persistenten Cache vorhanden ist, verwende diese
             real_size = self.archive_sizes_cache.get(name, size)
             self.tree.insert("", tk.END, text=name, values=(real_size, time_str, ptype))
         self._apply_archive_filter()
@@ -1682,149 +2099,39 @@ class BorgBackupGUI:
 
     def _open_mount_in_fm(self):
         """Oeffnet den Mount-Punkt im Dateimanager."""
-        if not self.mount_active:
+        if not self.mount_active or not self.mount_point:
             return
         try:
-            import subprocess as _sp
-
-            _sp.Popen(["xdg-open", self.mount_point])
+            subprocess.Popen(["xdg-open", self.mount_point], start_new_session=True)
         except Exception:
             messagebox.showerror("Fehler", "Konnte Dateimanager nicht öffnen.")
 
-    def _unmount_archive(self):
-        """Unmountet das Archiv und aktualisiert Buttons."""
-        import subprocess as _sp
-
-        try:
-            _sp.run(["borg", "umount", self.mount_point], capture_output=True, timeout=10)
-        except Exception:
-            _sp.run(["umount", "-l", self.mount_point], capture_output=True)
-        self.mount_active = False
-        self.mounted_archive_name = ""
+    def _sync_mount_state(self, mounts: list) -> None:
+        mine = [m for m in mounts if int(m.get("uid", -1)) == os.getuid()]
+        if mine:
+            self.mount_active = True
+            self.mount_point = str(mine[-1].get("path") or "")
+            self.mounted_archive_name = str(mine[-1].get("archive") or "")
+        else:
+            self.mount_active = False
+            self.mounted_archive_name = ""
         if hasattr(self, "mount_btn"):
-            self.mount_btn.config(text="Ausgewähltes Archiv mounten")
+            self.mount_btn.config(text="Aushängen" if self.mount_active else "Ausgewähltes Archiv einhängen")
         if hasattr(self, "open_btn"):
-            self.open_btn.config(state="disabled")
+            self.open_btn.config(state="normal" if self.mount_active else "disabled")
 
-    def _create_canary_file(self):
-        """Erstellt Canary-Datei mit bekanntem Inhalt vor dem Backup."""
-        import hashlib
+    def _unmount_archive(self):
+        """Hängt das Archiv über den Dienst aus."""
+        path = self.mount_point
 
-        profile_name = self.config_data.get("profile_name", "Standard")
-        timestamp = datetime.datetime.now().isoformat(timespec="seconds")
-        content_lines = [
-            "BORG-CANARY-CHECK",
-            f"Profile: {profile_name}",
-            f"Timestamp: {timestamp}",
-        ]
-        content_text = "\n".join(content_lines) + "\n"
-        expected_hash = hashlib.sha256(content_text.encode()).hexdigest()
-        content_lines.append(f"SHA256: {expected_hash}")
-        final_text = "\n".join(content_lines) + "\n"
-        with open(CANARY_FILE, "w") as cf:
-            cf.write(final_text)
-        self.canary_expected_hash = expected_hash
-        self.canary_profile_name = profile_name
-        self._append_backup_log(f"\n[Canary] Check-Datei erstellt: {CANARY_FILE}\n")
-        self._append_backup_log(f"[Canary] Erwarteter Hash: {expected_hash[:16]}...\n")
-        return str(CANARY_FILE)
+        def done(_result, error):
+            if error is not None:
+                self._show_notice(f"Aushängen fehlgeschlagen: {error.message}", level="error")
+            else:
+                self._show_notice("Archiv ausgehängt.", level="success")
+            self._refresh_daemon_status()
 
-    def _verify_canary(self):
-        """Extrahiert Canary aus dem Archiv und verifiziert den Hash in einem Hintergrundthread."""
-
-        def _worker():
-            import hashlib
-            import subprocess as _sp
-
-            expected_hash = self.canary_expected_hash if hasattr(self, "canary_expected_hash") else ""
-            canary_rel_path = "var/tmp/borg-canary-check.txt"
-            repo = self._borg_repo()
-            env = self._borg_env()
-
-            # Letztes Archiv ermitteln
-            try:
-                result = _sp.run(
-                    [BORG_BIN, "list", "--bypass-lock", "--last", "1", "--short", repo],
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=60,
-                )
-                if result.returncode != 0 or not result.stdout.strip():
-                    self.config_data["canary_last_result"] = "fail"
-                    self.config_data["canary_last_check"] = datetime.datetime.now().isoformat(timespec="seconds")
-                    self._append_backup_log("[Canary] ❌ KEIN Archiv zum Prüfen gefunden\n")
-                    self.master.after(0, self._update_dashboard_status)
-                    return
-                latest_archive = result.stdout.strip().split("\n")[0].strip()
-            except Exception as e:
-                self.config_data["canary_last_result"] = "fail"
-                self._append_backup_log(f"[Canary] ❌ Archiv-Ermittlung fehlgeschlagen: {e}\n")
-                self.master.after(0, self._update_dashboard_status)
-                return
-
-            # Canary: Datei aus dem Archiv extrahieren und SHA256-Hash verifizieren
-            try:
-                extract = _sp.run(
-                    [BORG_BIN, "extract", "--stdout", "--bypass-lock", f"{repo}::{latest_archive}", canary_rel_path],
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=60,
-                )
-                if extract.returncode != 0 or not extract.stdout.strip():
-                    self.config_data["canary_last_result"] = "fail"
-                    self.config_data["canary_last_check"] = datetime.datetime.now().isoformat(timespec="seconds")
-                    self._append_backup_log(f"[Canary] ❌ Datei NICHT im Archiv: {canary_rel_path}\n")
-                    self.master.after(0, self._update_dashboard_status)
-                    return
-
-                # Aus extrahiertem Inhalt den gespeicherten SHA256-Hash ermitteln
-                content_lines = extract.stdout.strip().split("\n")
-                sha_line = None
-                data_lines = []
-                for line in content_lines:
-                    if line.startswith("SHA256:"):
-                        sha_line = line
-                    else:
-                        data_lines.append(line)
-
-                if sha_line is None:
-                    self.config_data["canary_last_result"] = "fail"
-                    self.config_data["canary_last_check"] = datetime.datetime.now().isoformat(timespec="seconds")
-                    self._append_backup_log("[Canary] ❌ Kein SHA256-Eintrag in extrahierter Datei\n")
-                    self.master.after(0, self._update_dashboard_status)
-                    return
-
-                stored_hash = sha_line.split("SHA256:", 1)[1].strip()
-
-                # Hash des Daten-Teils neu berechnen
-                data_text = "\n".join(data_lines) + "\n"
-                computed_hash = hashlib.sha256(data_text.encode()).hexdigest()
-
-                # Hashes fürs PDF-Protokoll speichern
-                self.config_data["canary_expected_hash"] = expected_hash
-                self.config_data["canary_verified_hash"] = stored_hash
-
-                if computed_hash == stored_hash:
-                    self.config_data["canary_last_result"] = "ok"
-                    self.config_data["canary_last_check"] = datetime.datetime.now().isoformat(timespec="seconds")
-                    self._append_backup_log(f"[Canary] ✅ Integrität bestätigt – Hash {stored_hash[:16]}...\n")
-                else:
-                    self.config_data["canary_last_result"] = "fail"
-                    self.config_data["canary_last_check"] = datetime.datetime.now().isoformat(timespec="seconds")
-                    self._append_backup_log(
-                        f"[Canary] ❌ Hash-Fehler – erwartet {expected_hash[:16]}... != extrahiert {stored_hash[:16]}...\n"
-                    )
-
-                self._save_config()
-                self.master.after(0, self._update_dashboard_status)
-            except Exception as e:
-                self.config_data["canary_last_result"] = "fail"
-                self._append_backup_log(f"[Canary] ❌ Verifikation fehlgeschlagen: {e}\n")
-                self.master.after(0, self._update_dashboard_status)
-
-        threading.Thread(target=_worker, daemon=True).start()
+        self._daemon_call_async("umount", {"path": path}, on_done=done, slow=True)
 
     def _build_backup_tab(self):
         tab = self.tab_backup
@@ -1941,7 +2248,7 @@ class BorgBackupGUI:
         ttk.Entry(common_frame, textvariable=self.passphrase_var, width=35, show="*").grid(
             row=0, column=1, sticky="ew", padx=5, pady=2
         )
-        ttk.Label(common_frame, text="(leer = interaktiv abfragen)", font=("Arial", 8)).grid(
+        ttk.Label(common_frame, text="(wird nur root-geschützt im Backup-Dienst gespeichert)", font=("Arial", 8)).grid(
             row=1, column=1, sticky="w", padx=5
         )
 
@@ -2058,6 +2365,9 @@ class BorgBackupGUI:
             side="left", padx=(0, 4)
         )
         ttk.Button(dest_btns, text="Entfernen", command=self._remove_selected_destination).pack(side="left")
+        ttk.Button(dest_btns, text="Repository initialisieren", command=self._init_selected_destination).pack(
+            side="left", padx=4
+        )
         self.master.after(200, self._refresh_sources_tree)
         self.master.after(250, self._refresh_destinations_tree)
 
@@ -2108,7 +2418,7 @@ class BorgBackupGUI:
         self.tree.heading("#0", text="Archivname")
         self.tree.heading("size", text="Größe")
         self.tree.heading("time", text="Datum")
-        self.tree.heading("type", text="Profil-Typ")
+        self.tree.heading("type", text="Profil")
         self.tree.column("#0", width=280)
         self.tree.column("size", width=120)
         self.tree.column("time", width=160)
@@ -2121,39 +2431,192 @@ class BorgBackupGUI:
 
         btm = ttk.Frame(tab)
         btm.grid(row=3, column=0, sticky="ew", padx=10, pady=5)
-        self.mount_btn = ttk.Button(btm, text="Ausgewähltes Archiv mounten", command=self._toggle_mount)
+        self.mount_btn = ttk.Button(btm, text="Ausgewähltes Archiv einhängen", command=self._toggle_mount)
         self.mount_btn.pack(side="left", padx=2)
         self.open_btn = ttk.Button(btm, text="In Dateien öffnen", command=self._open_mount_in_fm, state="disabled")
         self.open_btn.pack(side="left", padx=2)
+        ttk.Button(btm, text="Wiederherstellen …", command=self._restore_selected_archive).pack(side="left", padx=2)
         ttk.Button(btm, text="Ausgewähltes Archiv löschen", command=self._delete_archive).pack(side="left", padx=2)
+        ttk.Label(
+            tab,
+            text="Einhängen, Wiederherstellen und Löschen erfordern das Administrator-Passwort.",
+            style="Muted.TLabel",
+        ).grid(row=4, column=0, sticky="w", padx=10, pady=(0, 8))
 
         # Cache & Mount-State
         self.archive_cache = {}  # profile_name -> list of tuples
         self.cache_time = None
         self.mount_active = False
-        self.mount_point = "/tmp/borg-mount"
+        self.mount_point = ""
         self.mounted_archive_name = ""
 
     def _build_restore_tab(self):
         tab = self.tab_restore
-        ttk.Label(tab, text="Wiederherstellung (Restore)", font=("Arial", 14, "bold")).pack(pady=10)
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(9, weight=1)
 
-        frame = ttk.Frame(tab)
-        frame.pack(pady=10)
+        ttk.Label(tab, text="Wiederherstellung", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(12, 2)
+        )
+        ttk.Label(
+            tab,
+            text="Dateien oder ganze Verzeichnisse aus einem Archiv zurückholen. Der Dienst stellt mit "
+            "root-Rechten wieder her (Besitzer und Rechte bleiben erhalten); dafür ist das "
+            "Administrator-Passwort nötig.",
+            style="Muted.TLabel",
+            wraplength=860,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 10))
 
-        ttk.Label(frame, text="Archivname:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
+        ttk.Label(tab, text="Backup-Volumen:").grid(row=2, column=0, sticky="e", padx=8, pady=4)
+        self.restore_job_var = tk.StringVar(value=self.config_data.get("profile_name", ""))
+        self.restore_job_combo = ttk.Combobox(tab, textvariable=self.restore_job_var, state="readonly", width=40)
+        self.restore_job_combo.grid(row=2, column=1, sticky="w", padx=4, pady=4)
+        self.restore_job_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_restore_archives())
+
+        ttk.Label(tab, text="Archiv:").grid(row=3, column=0, sticky="e", padx=8, pady=4)
         self.restore_archive_var = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.restore_archive_var, width=40).grid(row=0, column=1, padx=5)
+        self.restore_archive_combo = ttk.Combobox(tab, textvariable=self.restore_archive_var, width=60)
+        self.restore_archive_combo.grid(row=3, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Button(tab, text="Archive laden", command=self._load_restore_archives).grid(
+            row=3, column=2, sticky="w", padx=8, pady=4
+        )
 
-        ttk.Label(frame, text="Zielverzeichnis:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-        self.restore_path_var = tk.StringVar(value="/mnt/restore")
-        ttk.Entry(frame, textvariable=self.restore_path_var, width=40).grid(row=1, column=1, padx=5)
-        ttk.Button(frame, text="Ziel wählen", command=self._select_restore_target).grid(row=1, column=2, padx=5)
+        ttk.Label(tab, text="Nur diese Pfade:").grid(row=4, column=0, sticky="ne", padx=8, pady=4)
+        self.restore_paths_text = tk.Text(
+            tab,
+            height=3,
+            bg="#374151",
+            fg="#f8fafc",
+            insertbackground="#f8fafc",
+            relief="flat",
+            font=self.ui.get("font_mono", ("Courier", 9)),
+        )
+        self.restore_paths_text.grid(row=4, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Label(
+            tab,
+            text="Ein Pfad pro Zeile, z. B. /home/max/Dokumente.\nLeer = komplettes Archiv.",
+            style="Muted.TLabel",
+        ).grid(row=4, column=2, sticky="nw", padx=8, pady=4)
 
-        self.restore_log = tk.Text(tab, state="disabled", bg="#1e1e1e", fg="#00ff00", height=8)
-        self.restore_log.pack(fill="both", expand=True, padx=10, pady=10)
+        ttk.Label(tab, text="Zielverzeichnis:").grid(row=5, column=0, sticky="e", padx=8, pady=4)
+        self.restore_path_var = tk.StringVar(value=str(Path.home() / "Wiederherstellung"))
+        ttk.Entry(tab, textvariable=self.restore_path_var).grid(row=5, column=1, sticky="ew", padx=4, pady=4)
+        ttk.Button(tab, text="Ziel wählen", command=self._select_restore_target).grid(
+            row=5, column=2, sticky="w", padx=8, pady=4
+        )
+        self.restore_warning_var = tk.StringVar(value="")
+        tk.Label(
+            tab, textvariable=self.restore_warning_var, bg=self.ui["bg"], fg="#fbbf24", justify="left", anchor="w"
+        ).grid(row=6, column=1, columnspan=2, sticky="w", padx=4)
+        self.restore_path_var.trace_add("write", lambda *_a: self._update_restore_warning())
 
-        ttk.Button(tab, text="Restore starten", command=self._start_restore).pack(pady=5)
+        actions = ttk.Frame(tab)
+        actions.grid(row=7, column=1, columnspan=2, sticky="w", padx=4, pady=8)
+        self.restore_start_btn = ttk.Button(
+            actions, text="Wiederherstellung starten", style="Accent.TButton", command=self._start_restore
+        )
+        self.restore_start_btn.pack(side="left", padx=(0, 6))
+        self.restore_cancel_btn = ttk.Button(actions, text="Abbrechen", command=self._cancel_restore, state="disabled")
+        self.restore_cancel_btn.pack(side="left", padx=6)
+        ttk.Button(actions, text="Anleitung Komplett-Wiederherstellung", command=self._open_restore_doc).pack(
+            side="left", padx=6
+        )
+
+        self.restore_progress_var = tk.StringVar(value="")
+        progress_row = ttk.Frame(tab)
+        progress_row.grid(row=8, column=0, columnspan=3, sticky="ew", padx=12)
+        progress_row.columnconfigure(1, weight=1)
+        self.restore_progress = ttk.Progressbar(progress_row, mode="determinate", maximum=100, length=260)
+        self.restore_progress.grid(row=0, column=0, sticky="w")
+        ttk.Label(progress_row, textvariable=self.restore_progress_var, style="Muted.TLabel").grid(
+            row=0, column=1, sticky="w", padx=8
+        )
+
+        self.restore_log = tk.Text(tab, state="disabled", bg="#1e1e1e", fg="#00ff00", height=10, font=("Courier", 9))
+        self.restore_log.grid(row=9, column=0, columnspan=3, sticky="nsew", padx=12, pady=(6, 12))
+        self.master.after(400, self._refresh_restore_job_combo)
+
+    def _refresh_restore_job_combo(self) -> None:
+        if not hasattr(self, "restore_job_combo"):
+            return
+        names = [str(j.get("name")) for j in self.config_data.get("jobs") or [] if j.get("name")]
+        self.restore_job_combo["values"] = names
+        if self.restore_job_var.get() not in names:
+            self.restore_job_var.set(names[0] if names else "")
+
+    def _update_restore_warning(self) -> None:
+        target = os.path.normpath(self.restore_path_var.get().strip() or ".")
+        if target == "/":
+            self.restore_warning_var.set(
+                "Achtung: Ziel „/“ überschreibt Systemdateien des laufenden Systems. Für eine Komplett-"
+                "Wiederherstellung die Anleitung verwenden (Live-System)."
+            )
+        elif target in ("/etc", "/usr", "/var", "/boot", "/home"):
+            self.restore_warning_var.set(f"Achtung: Dateien unter {target} werden überschrieben.")
+        else:
+            self.restore_warning_var.set("")
+
+    def _load_restore_archives(self) -> None:
+        job = self.restore_job_var.get().strip()
+        if not job:
+            return
+        self.restore_progress_var.set("Archive werden geladen …")
+
+        def done(result, error):
+            if error is not None:
+                self.restore_progress_var.set("")
+                self._show_notice(f"Archivliste: {error.message}", level="error")
+                return
+            names = [str(a.get("name")) for a in (result or {}).get("archives") or [] if a.get("name")]
+            names.reverse()
+            self.restore_archive_combo["values"] = names
+            if names and self.restore_archive_var.get() not in names:
+                self.restore_archive_var.set(names[0])
+            self.restore_progress_var.set(f"{len(names)} Archive verfügbar")
+
+        self._daemon_call_async("list_archives", {"job": job}, on_done=done, slow=True)
+
+    def _restore_selected_archive(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showerror("Fehler", "Kein Archiv ausgewählt.")
+            return
+        values = self.tree.item(selected[0], "values")
+        job = str(values[2]) if len(values) > 2 and get_job(self.config_data, str(values[2])) else ""
+        self.restore_job_var.set(job or self.config_data.get("profile_name", ""))
+        self.restore_archive_var.set(self.tree.item(selected[0], "text"))
+        self.notebook.select(self.tab_restore)
+
+    def _open_restore_doc(self) -> None:
+        for path in RESTORE_DOC_PATHS:
+            if path.is_file():
+                try:
+                    subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
+                    return
+                except OSError:
+                    break
+        try:
+            subprocess.Popen(
+                ["xdg-open", "https://github.com/AniGerm/Borg-Backup-GUI/blob/main/docs/RESTORE.md"],
+                start_new_session=True,
+            )
+        except OSError as exc:
+            messagebox.showerror("Anleitung", str(exc))
+
+    def _update_restore_progress(self, current) -> None:
+        if not hasattr(self, "restore_progress"):
+            return
+        if not current:
+            if self.current_restore_id is None:
+                self.restore_progress["value"] = 0
+            return
+        stats = current.get("stats") or {}
+        percent = stats.get("percent")
+        if isinstance(percent, (int, float)):
+            self.restore_progress["value"] = float(percent)
+            self.restore_progress_var.set(f"{percent:.1f} % — {str(stats.get('last_item') or '')[:90]}")
+        else:
+            self.restore_progress_var.set(current.get("task_label") or "Wiederherstellung läuft …")
 
     # ============================================================
     # PROTOKOLL-TAB (PDF-Protokoll)
@@ -2314,7 +2777,7 @@ class BorgBackupGUI:
         self._append_protocol_preview(f"\n[{mode_str}] PDF-Protokoll wird erstellt...\n")
 
         if FPDF is None:
-            msg = 'fpdf2 ist nicht installiert.\nBitte "pip install fpdf2" ausführen.'
+            msg = "fpdf2 ist nicht verfügbar – die Installation ist unvollständig."
             self._append_protocol_preview(f"[FEHLER] {msg}\n")
             if not auto_generated:
                 messagebox.showerror("Fehler", msg)
@@ -2415,7 +2878,7 @@ class BorgBackupGUI:
                 ("Backup-Ziel (Repository):", repo),
                 ("Kompressionsmethode:", compression),
                 ("Zeitplan-Typ:", schedule_type),
-                ("Passwortlose Ausführung:", "Ja" if self.config_data.get("promptless_privilege", True) else "Nein"),
+                ("Ausführung:", f"Systemdienst {SERVICE_NAME} (root, systemd)"),
                 ("Verschlüsselung:", self.config_data.get("encryption", "repokey")),
             ]
             for label, value in cfg_lines:
@@ -2479,7 +2942,7 @@ class BorgBackupGUI:
             pdf.set_font("DV", "", 10)
 
             canary_lines = [
-                ("Canary-Datei:", "var/tmp/borg-canary-check.txt"),
+                ("Canary-Datei:", CANARY_FILE.lstrip("/")),
                 ("Letzte Prüfung:", canary_check or "noch nie"),
                 ("Prüfverfahren:", "SHA256-Hash via borg extract --stdout"),
             ]
@@ -2760,54 +3223,8 @@ class BorgBackupGUI:
         )
 
     def _refresh_dashboard_status(self):
-        self._update_dashboard_status()
-        if self.backup_running or not self._stats_missing_from_status():
-            return
-
-        self._show_notice("Statistik des letzten Backups wird geladen...", level="info", timeout_ms=4000)
-        threading.Thread(target=self._refresh_stats_from_latest_archive_worker, daemon=True).start()
-
-    def _refresh_stats_from_latest_archive_worker(self):
-        if self.backup_running:
-            return
-        repo = self._borg_repo()
-        env = self._borg_env()
-        cmd = [BORG_BIN, "info", "--bypass-lock", "--last", "1", repo]
-        cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
-
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=90)
-        except Exception:
-            return
-
-        if result.returncode != 0:
-            return
-
-        files_match = re.search(r"Number of files:\s*(\d+)", result.stdout)
-        archive_name_match = re.search(r"Archive name:\s*(.+)", result.stdout)
-        totals_match = re.search(
-            r"This archive:\s+([0-9.,]+\s*[KMGTPE]?i?B)\s+([0-9.,]+\s*[KMGTPE]?i?B)\s+([0-9.,]+\s*[KMGTPE]?i?B)",
-            result.stdout,
-        )
-
-        updates = {}
-        if files_match:
-            updates["last_files_count"] = int(files_match.group(1))
-        if archive_name_match:
-            updates["last_item"] = f"Archiv {archive_name_match.group(1).strip()}"
-        if totals_match:
-            updates["last_source_size"] = totals_match.group(1)
-            updates["last_dedupe_size"] = totals_match.group(3)
-
-        if not updates:
-            return
-
-        self.master.after(0, lambda: self._apply_recovered_dashboard_stats(updates))
-
-    def _apply_recovered_dashboard_stats(self, updates):
-        self.status_data.update(updates)
-        self._save_status()
-        self._update_dashboard_status()
+        self._refresh_daemon_status()
+        self._update_dashboard_status(force=True)
 
     def _update_backup_progress(self, text):
         line = text.strip()
@@ -2894,117 +3311,12 @@ class BorgBackupGUI:
         if path:
             self.restore_path_var.set(path)
 
-    def _borg_env(self):
-        """Liefert Umgebungsvariablen für Borg – je nach Profil-Typ (ssh/s3/local)."""
-        env = os.environ.copy()
-        profile_type = self.config_data.get("profile_type", "ssh")
-
-        # Cache & ungepuffertes Live-Logging immer setzen
-        env["BORG_CACHE_DIR"] = os.path.expanduser("~/.cache/borg")
-        env["PYTHONUNBUFFERED"] = "1"
-
-        if profile_type == "s3":
-            # S3 Object Storage – KEIN BORG_RSH!
-            env["AWS_ACCESS_KEY_ID"] = self.config_data.get("s3_access_key", "")
-            env["AWS_SECRET_ACCESS_KEY"] = self.config_data.get("s3_secret_key", "")
-            if self.config_data.get("s3_endpoint_url"):
-                env["AWS_ENDPOINT_URL"] = self.config_data.get("s3_endpoint_url")
-            if self.config_data.get("s3_region"):
-                env["AWS_DEFAULT_REGION"] = self.config_data.get("s3_region")
-        elif profile_type == "local":
-            # Lokales Laufwerk – kein BORG_RSH, kein AWS
-            pass
-        else:
-            # SSH / Storage Box (Standard)
-            ssh_cmd = (
-                "ssh -p 23"
-                " -o StrictHostKeyChecking=accept-new"
-                " -o BatchMode=yes"
-                " -o ConnectTimeout=30"
-                " -o ServerAliveInterval=15"
-                " -o ServerAliveCountMax=3"
-            )
-            if self.ssh_key_var.get():
-                key = self.ssh_key_var.get().strip()
-                ssh_cmd += f' -i "{key}"'
-            env["BORG_RSH"] = ssh_cmd
-
-        if self.config_data.get("repo_access_confirmed"):
-            env["BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK"] = "yes"
-            env["BORG_RELOCATED_REPO_ACCESS_IS_OK"] = "yes"
-
-        # Passphrase für alle Typen
-        if self.passphrase_var.get():
-            env["BORG_PASSPHRASE"] = self.passphrase_var.get()
-        return env
-
     def _borg_repo(self):
-        """Liefert die Borg-Repository-URL je nach Profil-Typ."""
-        profile_type = self.config_data.get("profile_type", "ssh")
-
-        if profile_type == "local":
-            return self.config_data.get("local_path", "") or "/tmp/borg-repo"
-
-        # Speicher-URL aus Config (wird von _collect_config_from_ui aktuell gehalten)
-        repo = self.config_data.get("storage", "").strip()
-
-        if profile_type == "s3":
-            if not repo.startswith("s3://"):
-                repo = f"s3://{repo}"
-            return repo
-
-        # SSH – Korrigiert versehentliches Scp-Format mit Port im Pfad
-        if "://" not in repo and ":" in repo:
-            host_part, path_part = repo.split(":", 1)
-            if path_part.startswith("23/"):
-                repo = f"{host_part}:{path_part[3:]}"
-                self.config_data["storage"] = repo
-                if hasattr(self, "storage_var"):
-                    self.storage_var.set(repo)
-
-        return repo
-
-    def _command_with_privilege(self, cmd, env, needs_root=False):
-        """Wrap command with non-interactive sudo when privileged access is required."""
-        if not needs_root:
-            return cmd, env
-
-        if self.is_root:
-            return cmd, env
-
-        # Keine interaktiven Passworteingaben mehr: nur non-interactive sudo.
-        # Wenn das System nicht entsprechend vorbereitet ist, scheitert der Befehl sauber ohne Nachfrage.
-        if shutil.which("sudo"):
-            check = subprocess.run(
-                ["sudo", "-n", "-E", BORG_BIN, "--version"],
-                capture_output=True,
-                text=True,
-                env=env,  # Env mit BORG_RSH/AWS_* übergeben
-            )
-            if check.returncode != 0:
-                raise PermissionError(
-                    "Passwortfreies sudo ist nicht eingerichtet. "
-                    "Für automatische Backups muss eine einmalige NOPASSWD-Regel "
-                    "für dieses Programm eingerichtet werden."
-                )
-
-            # Root-Läufe bekommen ihren eigenen Cache, damit keine root-owned
-            # Cache-Dateien den User-Zugriff auf borg list/info blockieren.
-            env["HOME"] = "/root"
-            env["XDG_CONFIG_HOME"] = "/root/.config"
-            env["XDG_CACHE_HOME"] = "/root/.cache"
-            env["BORG_CACHE_DIR"] = "/root/.cache/borg"
-
-            wrapped = ["sudo", "-n", "-E"]
-            wrapped.extend(cmd)
-            return wrapped, env
-
-        return cmd, env
-
-    def _run_borg_sync(self, cmd, timeout=None, needs_root=False):
-        env = self._borg_env()
-        final_cmd, final_env = self._command_with_privilege(cmd, env, needs_root=needs_root)
-        return subprocess.run(final_cmd, capture_output=True, text=True, timeout=timeout, env=final_env)
+        """Repository des primären Ziels des aktiven Volumens (nur Anzeige / Protokoll)."""
+        dest, account = self._primary_dest_and_account()
+        if dest is None or account is None:
+            return str(self.config_data.get("storage", ""))
+        return resolve_repo(account, dest)
 
     def _parse_iso_time(self, value):
         if not value:
@@ -3020,11 +3332,35 @@ class BorgBackupGUI:
             return "-"
         return dt.strftime("%d.%m.%Y %H:%M:%S")
 
+    def _sync_autostart_override(self) -> None:
+        """User override for system XDG autostart: disable via Hidden=true when tray is off."""
+        tray_enabled = bool(self.config_data.get("tray_enabled", True))
+        try:
+            if tray_enabled:
+                if AUTOSTART_FILE.is_file():
+                    AUTOSTART_FILE.unlink()
+                return
+            AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+            AUTOSTART_FILE.write_text(
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Borg Backup GUI\n"
+                "Exec=borg-backup-gui --tray\n"
+                "Hidden=true\n"
+                "X-GNOME-Autostart-enabled=false\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self._show_notice(f"Autostart-Override fehlgeschlagen: {exc}", level="warning")
+
     def _on_tray_settings_change(self):
         if not self.tray_supported:
-            self._show_notice("Tray nicht verfügbar. Installiere bitte pystray und pillow.", level="warning")
+            self._show_notice(
+                "Tray nicht verfügbar. Bitte AppIndicator und Pillow (python3-pil) installieren.", level="warning"
+            )
             return
         self._save_config()
+        self._sync_autostart_override()
         self._setup_tray_icon(force_restart=True)
         self._update_dashboard_status()
         self._show_notice("Tray-Einstellungen übernommen.", level="success")
@@ -3054,26 +3390,12 @@ class BorgBackupGUI:
             self._schedule_tray_live_refresh(1000)
             return
 
-        if not (pystray and Image and ImageDraw):
-            self.tray_ready = False
-            self._show_notice(
-                "Tray-Fallback nicht verfügbar (pystray/Pillow fehlen).", level="warning", timeout_ms=10000
-            )
-            return
-
-        self._schedule_tray_live_refresh(1000)
-
-        initial_color, _ = self._compute_status_traffic_light()
-        image = self._build_tray_icon_image(initial_color, self._tray_icon_status_kind(initial_color))
-
-        try:
-            self.tray_icon = pystray.Icon("borg_backup_gui", image, "Borg Backup GUI", self._build_pystray_menu())
-            self.tray_icon.run_detached()
-            self.tray_ready = True
-        except Exception as exc:
-            self.tray_icon = None
-            self.tray_ready = False
-            self._show_notice(f"Tray konnte nicht gestartet werden: {exc}", level="warning", timeout_ms=10000)
+        self.tray_ready = False
+        self._show_notice(
+            "Tray nicht verfügbar (AppIndicator fehlt). Bitte gir1.2-ayatanaappindicator3 installieren.",
+            level="warning",
+            timeout_ms=10000,
+        )
 
     def _ensure_tray_ready_or_fallback(self):
         if self.tray_ready or not self.tray_runtime_available:
@@ -3166,18 +3488,6 @@ class BorgBackupGUI:
 
     def _tray_backup_action_text(self, _item=None):
         return self._tray_backup_action_label()
-
-    def _build_pystray_menu(self):
-        return pystray.Menu(
-            pystray.MenuItem(self._tray_info_text(0), lambda *_: None, enabled=False),
-            pystray.MenuItem(self._tray_info_text(1), lambda *_: None, enabled=False),
-            pystray.MenuItem(self._tray_info_text(2), lambda *_: None, enabled=False),
-            pystray.MenuItem(self._tray_info_text(3), lambda *_: None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Fenster anzeigen", self._tray_menu_show_window),
-            pystray.MenuItem(self._tray_backup_action_text, self._tray_menu_backup_toggle),
-            pystray.MenuItem("Beenden", self._tray_menu_quit),
-        )
 
     def _build_native_indicator_menu(self):
         summary_lines = self._tray_live_summary_lines()
@@ -3987,50 +4297,20 @@ class BorgBackupGUI:
             self._show_notice("Zeitplan und Wartungseinstellungen gespeichert.", level="success")
 
     def _schedule_next_backup(self):
+        """Zeitpläne gehören dem Systemdienst; die GUI zeigt nur den Status an."""
         if hasattr(self, "scheduled_job_id") and self.scheduled_job_id:
             try:
                 self.master.after_cancel(self.scheduled_job_id)
             except Exception:
                 pass
             self.scheduled_job_id = None
-
-        next_runs = self._collect_volume_next_runs(include_unsaved=False)
-        if not next_runs:
-            self.next_backup_dt = None
-            self.next_scheduled_job_name = None
-            self._refresh_schedule_overview()
-            return
-
-        name, candidate = min(next_runs, key=lambda item: item[1])
-        now = datetime.datetime.now()
-        self.next_backup_dt = candidate
-        self.next_scheduled_job_name = name
-        delay_ms = int(max(0, (candidate - now).total_seconds()) * 1000)
-        self.scheduled_job_id = self.master.after(max(delay_ms, 1000), self._scheduled_backup_trigger)
         self._refresh_schedule_overview()
+        if self.daemon_online:
+            self._refresh_daemon_status()
 
     def _scheduled_backup_trigger(self):
+        # Kompatibilität: alte Timer-Callbacks werden verworfen.
         self.scheduled_job_id = None
-        job_name = self.next_scheduled_job_name or self.config_data.get("profile_name", "Standard")
-        if self.backup_running:
-            running = self.current_backup_job_name or "aktuelles Backup"
-            self._append_backup_log(
-                f"\n[WARNUNG] Geplanter Start für „{job_name}“ verschoben: „{running}“ läuft noch "
-                "(parallele Backups würden die Performance stark belasten).\n"
-            )
-            self._show_notice(
-                f"Zeitplan-Konflikt: „{job_name}“ wartet, bis „{running}“ fertig ist.",
-                level="warning",
-                timeout_ms=10000,
-            )
-            self.scheduled_job_id = self.master.after(5 * 60 * 1000, self._scheduled_backup_trigger)
-            self._update_dashboard_status()
-            return
-
-        self._append_backup_log(f"\n>>> Geplanter Backup-Start: {job_name}\n")
-        if job_name and job_name != self.config_data.get("profile_name"):
-            self._apply_profile(job_name)
-        self._start_backup(from_scheduler=True, job_name=job_name)
 
     def _periodic_dashboard_refresh(self):
         self._update_dashboard_status()
@@ -4105,475 +4385,112 @@ class BorgBackupGUI:
         self._restore_stats_from_status()
 
     def _start_backup(self, from_scheduler=False, job_name: str | None = None):
-        if self.backup_running:
-            if not from_scheduler:
-                self._show_notice("Es läuft bereits ein Backup.", level="info")
+        # Zeitpläne führt ausschließlich der Systemdienst aus.
+        if from_scheduler:
             return
-
-        # Hintergrund-Leseoperationen sofort abbrechen, um Lock-Konflikte zu vermeiden
-        self.archive_loading_token += 1
-        if self.archive_runner:
-            self.archive_runner.stop()
+        if self.backup_running or self.daemon_busy:
+            self._show_notice("Es läuft bereits ein Auftrag im Backup-Dienst.", level="info")
+            return
+        if not self.daemon_online:
+            self._show_notice(
+                f"Backup-Dienst {SERVICE_NAME} nicht verbunden — bitte starten.",
+                level="warning",
+                timeout_ms=10000,
+            )
+            return
 
         target_job = (job_name or self.config_data.get("profile_name") or "Standard").strip()
         if job_name and job_name != self.config_data.get("profile_name"):
             self._apply_profile(job_name)
-
-        self._save_config()
-        if not from_scheduler:
-            self.notebook.select(self.tab_backup)
-        self.current_backup_job_name = target_job
-        repo = self._borg_repo()
-
-        if hasattr(self, "sources_tree"):
-            self._collect_sources_from_ui()
-        sources = list(self.config_data.get("sources") or [])
-        if sources:
-            includes, excludes = flatten_source_excludes(sources)
-        else:
-            includes = list(self.config_data.get("include_folders") or ["/"])
-            excludes = list(self.config_data.get("exclude_folders") or [])
-
-        if not includes:
-            messagebox.showerror("Fehler", "Mindestens ein Laufwerk/Pfad muss angegeben sein.")
+        if not get_job(self.config_data, target_job):
+            messagebox.showerror("Backup", f"Backup-Volumen „{target_job}“ nicht gefunden.")
             return
 
-        available, missing = filter_available_includes(includes)
-        if missing:
-            self._append_backup_log("[WARNUNG] Fehlende Quellen übersprungen: " + ", ".join(missing) + "\n")
-            self._show_notice(f"{len(missing)} Quelle(n) nicht gemountet.", level="warning", timeout_ms=8000)
-        includes = available
-        if not includes:
-            messagebox.showerror("Fehler", "Keine verfügbaren Include-Pfade.")
-            return
-
-        archive_name = f"{os.uname().nodename}-{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}"
-        compression = self.compression_var.get().strip() or "lz4"
-
+        self.archive_loading_token += 1
+        self._save_config(push=False)
+        self.notebook.select(self.tab_backup)
         self._reset_backup_progress()
-        self.backup_task_queue = []
-        self.backup_current_task = None
-        self.backup_dest_results = []
+        self._append_backup_log(f"\n>>> Übergebe Backup „{target_job}“ an {SERVICE_NAME}…\n")
 
-        # Canary-Check-Datei erstellen (vor dem Backup)
-        canary_enabled = self.config_data.get("canary_enabled", True)
-        if canary_enabled:
-            canary_path = self._create_canary_file()
-            # Canary-Verzeichnis automatisch zum Include hinzufuegen
-            if canary_path not in includes:
-                includes.append(canary_path)
-
-        # Ohne --list: Progress liefert Live-Stats; --list füllte das Tk-Log mit Millionen Zeilen (RAM-Leck).
-        create_cmd = [
-            BORG_BIN,
-            "create",
-            "--lock-wait=60",
-            "--progress",
-            "-v",
-            "--stats",
-            f"--compression={compression}",
-        ]
-
-        # Canary-Datei per --pattern explizit einschliessen (MUSS vor ARCHIVE stehen!)
-        if canary_enabled:
-            create_cmd.extend(["--pattern", f"+{CANARY_FILE.lstrip('/')}"])
-
-        create_cmd.append(f"{repo}::{archive_name}")
-        create_cmd.extend(includes)
-        for ex in excludes:
-            create_cmd.extend(["--exclude", ex])
-        self.backup_task_queue.append(
-            {
-                "label": f"Starte Backup: {archive_name}",
-                "cmd": create_cmd,
-                "needs_root": True,
-                "kind": "create",
-                "dest_name": "primary",
-            }
-        )
-
-        # Weitere Ziele des Jobs (Account/Destination-Modell)
-        job = self._active_job() if hasattr(self, "_active_job") else None
-        all_dests = destinations_for_job(self.config_data, job) if job else []
-        extra_dests = all_dests[1:] if all_dests else []
-        trust = bool(self.config_data.get("repo_access_confirmed"))
-        for dest in extra_dests:
-            account = get_account(self.config_data, str(dest.get("account_id", ""))) or {}
-            extra_repo = resolve_repo(account, dest)
-            extra_cmd = [
-                BORG_BIN,
-                "create",
-                "--lock-wait=60",
-                "--progress",
-                "-v",
-                "--stats",
-                f"--compression={compression}",
-            ]
-            if canary_enabled:
-                extra_cmd.extend(["--pattern", f"+{CANARY_FILE.lstrip('/')}"])
-            extra_cmd.append(f"{extra_repo}::{archive_name}")
-            extra_cmd.extend(includes)
-            for ex in excludes:
-                extra_cmd.extend(["--exclude", ex])
-            self.backup_task_queue.append(
-                {
-                    "label": f"Backup → {dest.get('name', extra_repo)}",
-                    "cmd": extra_cmd,
-                    "needs_root": True,
-                    "kind": "create",
-                    "dest_name": str(dest.get("name") or extra_repo),
-                    "dest_env": build_borg_env(account, dest, trust_repo_access=trust),
-                }
-            )
-        run_prune = bool(getattr(self, "prune_var", None) and self.prune_var.get())
-        run_check = False
-        if getattr(self, "validate_var", None) and self.validate_var.get():
-            try:
-                last_check = self._parse_iso_time(self.status_data.get("last_check_at", ""))
-                weeks = int(self.validate_interval_var.get())
-                if not last_check or datetime.datetime.now() > last_check + datetime.timedelta(weeks=weeks):
-                    run_check = True
-            except Exception:
-                run_check = True
-
-        run_compact = False
-        if getattr(self, "optimize_var", None) and self.optimize_var.get():
-            try:
-                last_compact = self._parse_iso_time(self.status_data.get("last_compact_at", ""))
-                weeks = int(self.optimize_interval_var.get())
-                if not last_compact or datetime.datetime.now() > last_compact + datetime.timedelta(weeks=weeks):
-                    run_compact = True
-            except Exception:
-                run_compact = True
-
-        maintain_all = bool(getattr(self, "maintain_all_dest_var", None) and self.maintain_all_dest_var.get()) or bool(
-            self.config_data.get("maintain_all_destinations")
-        )
-
-        def _queue_maintenance(target_repo: str, dest_env=None, label_suffix: str = "") -> None:
-            if run_prune:
-                prune_cmd = [
-                    BORG_BIN,
-                    "prune",
-                    "-v",
-                    "--list",
-                    "--stats",
-                    "--keep-daily=7",
-                    "--keep-weekly=4",
-                    "--keep-monthly=6",
-                    target_repo,
-                ]
-                self.backup_task_queue.append(
-                    {
-                        "label": f"Prune{label_suffix}",
-                        "cmd": prune_cmd,
-                        "needs_root": True,
-                        "kind": "prune",
-                        "dest_env": dest_env,
-                    }
-                )
-            if run_check:
-                check_cmd = [BORG_BIN, "check", "-v", "--repository-only", target_repo]
-                self.backup_task_queue.append(
-                    {
-                        "label": f"Check{label_suffix}",
-                        "cmd": check_cmd,
-                        "needs_root": True,
-                        "kind": "check",
-                        "dest_env": dest_env,
-                    }
-                )
-            if run_compact:
-                compact_cmd = [BORG_BIN, "compact", "-v", target_repo]
-                self.backup_task_queue.append(
-                    {
-                        "label": f"Compact{label_suffix}",
-                        "cmd": compact_cmd,
-                        "needs_root": True,
-                        "kind": "compact",
-                        "dest_env": dest_env,
-                    }
-                )
-
-        _queue_maintenance(repo)
-        if maintain_all:
-            for dest in extra_dests:
-                account = get_account(self.config_data, str(dest.get("account_id", ""))) or {}
-                extra_repo = resolve_repo(account, dest)
-                _queue_maintenance(
-                    extra_repo,
-                    dest_env=build_borg_env(account, dest, trust_repo_access=trust),
-                    label_suffix=f" → {dest.get('name', extra_repo)}",
-                )
-
-        self.runner.append_log(f"\n>>> Starte Backup: {archive_name}\n\n")
-        self.backup_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
-        self.runner.stop_flag = False
-        self.backup_running = True
-        self.current_backup_started_at = datetime.datetime.now()
-        self.status_data["last_run_at"] = self.current_backup_started_at.isoformat(timespec="seconds")
-        self.status_data["last_error"] = ""
-        self._save_status()
-        self._schedule_tray_live_refresh(1000)
-        self._update_dashboard_status()
-
-        self._run_next_backup_task(repo)
-
-    def _run_next_backup_task(self, repo=None):
-        if not self.backup_task_queue:
-            self._backup_done({"exit_code": 0, "stopped": False, "exception": ""})
-            return
-
-        task = self.backup_task_queue.pop(0)
-        self.backup_current_task = task
-
-        try:
-            base_env = task.get("dest_env") or self._borg_env()
-            cmd, env = self._command_with_privilege(task["cmd"], base_env, needs_root=task.get("needs_root", False))
-        except PermissionError as exc:
-            self.backup_task_queue = []
-            self.backup_current_task = None
-            self.backup_running = False
-            self.backup_btn.config(state="normal")
-            self.stop_btn.config(state="disabled")
-            self.status_data["last_error"] = str(exc)
-            self._save_status()
-            self._update_dashboard_status()
-            self._append_backup_log(f"\n[HINWEIS] {exc}\n")
-            messagebox.showinfo(
-                "Einmalige Einrichtung erforderlich",
-                f"{exc}\n\nDanach laufen Backup und Restore ohne Passwortabfrage im Hintergrund.",
-            )
-            return
-
-        self.runner.append_log(f"\n>>> {task['label']}\n")
-        self.runner.stop_flag = False
-        self.runner.run(cmd, env=env, done_callback=self._backup_task_done)
-
-    def _backup_task_done(self, result):
-        task = self.backup_current_task or {}
-        kind = task.get("kind", "")
-        ok = (
-            result.get("exit_code", -1) in (0, 1)
-            and not result.get("stopped", False)
-            and not result.get("exception", "").strip()
-        )
-
-        if kind == "create":
-            self.backup_dest_results.append(
-                {
-                    "name": task.get("dest_name") or task.get("label") or "ziel",
-                    "ok": ok,
-                    "exit_code": result.get("exit_code", -1),
-                    "error": result.get("exception", "") or ("" if ok else f"exit {result.get('exit_code')}"),
-                }
-            )
-
-        if ok:
-            if kind == "check":
-                self.status_data["last_check_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-            elif kind == "compact":
-                self.status_data["last_compact_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-
-            self._save_status()
-            self._update_dashboard_status()
-            self._run_next_backup_task()
-            return
-
-        # Bei Multi-Ziel: Create-Fehler an einem Ziel nicht alles abbrechen
-        if kind == "create" and self.backup_task_queue:
-            self._append_backup_log("\n[WARNUNG] Ziel fehlgeschlagen – fahre mit nächstem Task fort.\n")
-            self._run_next_backup_task()
-            return
-        self._backup_done(result)
-
-    def _stop_backup(self):
-        if self.runner:
-            self.runner.stop()
-        self.backup_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-
-    def _backup_done(self, result):
-        self.backup_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
-
-        self.backup_running = False
-        finished_at = datetime.datetime.now()
-        duration = None
-        if self.current_backup_started_at:
-            duration = (finished_at - self.current_backup_started_at).total_seconds()
-
-        exit_code = result.get("exit_code", -1)
-        stopped = bool(result.get("stopped", False))
-        exception_text = result.get("exception", "").strip()
-
-        create_results = list(self.backup_dest_results or [])
-        failed_creates = [r for r in create_results if not r.get("ok")]
-        # Aggregate: any failed create makes the run partial/failed even if last task was OK
-        if failed_creates and exit_code in (0, 1) and not stopped and not exception_text:
-            exit_code = 2
-            exception_text = ""
-            names = ", ".join(str(r.get("name")) for r in failed_creates)
-            self._append_backup_log(f"\n[TEILFEHLER] Fehlgeschlagene Ziele: {names}\n")
-
-        self.status_data["last_files_count"] = self.status_data.get("last_files_count", self.backup_files_seen)
-        self.status_data["last_source_size"] = self.status_data.get("last_source_size", "")
-        self.status_data["last_dedupe_size"] = self.status_data.get("last_dedupe_size", "")
-        self.status_data["last_item"] = self.status_data.get("last_item", self.backup_last_item)
-        self.status_data["last_dest_results"] = create_results
-
-        self.status_data["last_exit_code"] = exit_code
-        self.status_data["last_duration_sec"] = duration
-
-        if exit_code in (0, 1) and not stopped and not exception_text and not failed_creates:
-            self.status_data["last_success_at"] = finished_at.isoformat(timespec="seconds")
-            self._set_job_last_success(
-                self.current_backup_job_name or self.config_data.get("profile_name", ""), finished_at
-            )
-            # Canary-Check nach erfolgreichem Backup
-            if self.config_data.get("canary_enabled", True):
-                self.master.after(500, self._verify_canary)
-            # Auto-PDF-Protokoll (nach Canary-Check, mit 3s Verzoegerung)
-            auto_pdf = getattr(self, "protocol_auto_var", None)
-            if auto_pdf is not None and auto_pdf.get():
-                self.master.after(4000, lambda: self._generate_pdf_report(auto_generated=True))
-            if exit_code == 1:
-                self.status_data["last_error"] = "Backup mit Warnungen beendet."
+        def after_push(ok: bool, message: str) -> None:
+            if not ok:
                 self._show_notice(
-                    "Backup mit Warnungen beendet. Das Archiv wurde trotzdem erfolgreich geschrieben.",
-                    level="warning",
-                    timeout_ms=10000,
+                    f"Konfiguration nicht an den Dienst übertragen: {message or 'abgebrochen'}",
+                    level="error",
+                    timeout_ms=12000,
                 )
-            else:
-                self.status_data["last_error"] = ""
-                self._show_notice("Backup erfolgreich beendet.", level="success", timeout_ms=10000)
-        elif failed_creates and not stopped:
-            ok_n = sum(1 for r in create_results if r.get("ok"))
-            fail_n = len(failed_creates)
-            self.status_data["last_error"] = f"Teilfehler: {fail_n} Ziel(e) fehlgeschlagen, {ok_n} erfolgreich."
-            if ok_n > 0:
-                # Partial success still advances last_success for scheduling; error text stays visible
-                self.status_data["last_success_at"] = finished_at.isoformat(timespec="seconds")
-                self._set_job_last_success(
-                    self.current_backup_job_name or self.config_data.get("profile_name", ""), finished_at
-                )
-                if self.config_data.get("canary_enabled", True):
-                    self.master.after(500, self._verify_canary)
-            self._show_notice(self.status_data["last_error"], level="warning", timeout_ms=14000)
-        else:
-            if stopped:
-                self.status_data["last_error"] = "Backup wurde manuell abgebrochen."
-            elif exception_text:
-                self.status_data["last_error"] = f"Exception: {exception_text}"
-            else:
-                self.status_data["last_error"] = f"Borg Exit-Code: {exit_code}"
-            self._show_notice(
-                f"Backup nicht erfolgreich: {self.status_data['last_error']}", level="error", timeout_ms=12000
-            )
+                return
 
-        self.backup_task_queue = []
-        self.backup_current_task = None
-        self.current_backup_job_name = None
-        self._save_status()
-        self._schedule_next_backup()
-        self._update_dashboard_status()
+            def done(result, error) -> None:
+                if error is not None:
+                    messagebox.showerror("Backup", error.message)
+                    return
+                if isinstance(result, dict):
+                    self.current_run_id = str(result.get("id") or "")
+                self.current_backup_job_name = target_job
+                self._append_backup_log(f"[OK] Auftrag gestartet (ID {self.current_run_id}).\n")
+                self._refresh_daemon_status()
 
-        if self.archive_list_refresh_pending:
-            self.archive_list_refresh_pending = False
-            self.master.after(1000, self._load_archive_list)
-        else:
-            # Nach jedem Backup Cache invalidieren + neu laden
-            self._refresh_archive_cache()
+            self._daemon_call_async("run_job", {"job": target_job}, on_done=done)
+
+        self._push_config_if_changed(on_done=after_push, force=True)
+
+    def _stop_backup(self) -> None:
+        current = self.daemon_status.get("current") or {}
+        run_id = str(current.get("id") or getattr(self, "current_run_id", "") or "")
+        if not run_id:
+            self._show_notice("Kein laufender Auftrag zum Abbrechen.", level="info")
+            return
+
+        def done(result, error) -> None:
+            if error is not None:
+                self._show_notice(f"Abbruch fehlgeschlagen: {error.message}", level="error")
+                return
+            self._append_backup_log("\n[INFO] Abbruch an den Backup-Dienst gesendet.\n")
+            self._refresh_daemon_status()
+
+        self._daemon_call_async("cancel", {"id": run_id}, on_done=done)
 
     def _load_archive_list(self):
-        self._save_config()
-        repo = self._borg_repo()
-
+        if not self.daemon_online:
+            self._set_archive_loading(False, "Backup-Dienst nicht verbunden")
+            self._show_notice("Archivliste: Backup-Dienst nicht verbunden.", level="warning")
+            return
         if self.backup_running:
             self.archive_list_refresh_pending = True
             self._show_notice("Archivliste wird nach dem laufenden Backup neu geladen.", level="info")
             return
 
+        job_name = self.config_data.get("profile_name", "Standard")
         self.archive_loading_token += 1
+        token = self.archive_loading_token
         self._set_archive_loading(True, "Archivliste wird geladen...")
         self.tree.delete(*self.tree.get_children())
-
-        # Cache invalidieren
-        self.archive_cache.pop(self.config_data.get("profile_name", "Standard"), None)
+        self.archive_cache.pop(job_name, None)
         self.cache_time = None
 
-        env = self._borg_env()
-        cmd = [BORG_BIN, "list", "--bypass-lock", repo, "--json"]
-        cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
-
-        self._append_backup_log("Lade Archivliste... (Timeout: 120s)\n")
-        self.archive_runner.stop_flag = False
-        self.archive_runner.run_capture(cmd, env=env, done_callback=self._on_archive_list_loaded)
-
-    def _on_archive_list_loaded(self, result):
-        ex = result.get("exception", "")
-        if ex:
-            self._set_archive_loading(False, "Fehler beim Laden")
-            self._show_notice(f"Archivliste: {ex}", level="error")
-            return
-        if result["exit_code"] != 0:
-            err = result["stderr"].strip() or result["stdout"].strip() or "Unbekannter Fehler"
-            # Bei leerem/nicht initiiertem Repository: freundliche Meldung
-            if "Repository" in err and ("does not exist" in err or "not found" in err):
-                self._set_archive_loading(False, "Noch kein Repository initialisiert")
+        def done(result, error):
+            if token != self.archive_loading_token:
                 return
-            self._set_archive_loading(False, "Fehler beim Laden")
-            self._show_notice(f"Archivliste fehlgeschlagen: {err[:120]}", level="error")
-            return
-        try:
-            profile_name = self.config_data.get("profile_name", "Standard")
+            if error is not None:
+                self._set_archive_loading(False, "Fehler beim Laden")
+                self._show_notice(f"Archivliste: {error.message}", level="error")
+                return
+            archives = list((result or {}).get("archives") or [])
             profile_type = self.config_data.get("profile_type", "ssh")
-            data = json.loads(result["stdout"])
-            archives = data.get("archives", [])
-            if not archives:
-                self._set_archive_loading(False, "Keine Archive gefunden.")
-                self.archive_cache[profile_name] = []
-                self.cache_time = datetime.datetime.now()
-                return
-
-            token = self.archive_loading_token
-            rows = []
             cache_list = []
-            missing_count = 0
             for archive in archives:
-                name = archive.get("name") or archive.get("archive") or "?"
-                time_str = archive.get("time", "?")
-                size = archive.get("stats", {}).get("original_size", None)
-                if size:
-                    size_hr = self._human_size(size)
-                    self.archive_sizes_cache[name] = size_hr
-                elif name in self.archive_sizes_cache:
-                    size_hr = self.archive_sizes_cache[name]
-                else:
-                    size_hr = "wird geladen..."
-                    missing_count += 1
-
-                item_id = self.tree.insert("", tk.END, text=name, values=(size_hr, time_str, profile_type))
-                rows.append((item_id, name, size_hr, profile_type))
+                name = str(archive.get("name") or "?")
+                time_str = str(archive.get("time") or "?")
+                size_hr = self.archive_sizes_cache.get(name, "—")
+                self.tree.insert("", tk.END, text=name, values=(size_hr, time_str, profile_type))
                 cache_list.append((name, size_hr, time_str, profile_type))
-
-            # Cache speichern
-            self.archive_cache[profile_name] = cache_list
+            self.archive_cache[job_name] = cache_list
             self.cache_time = datetime.datetime.now()
-            self._save_archive_sizes_cache()
+            self._apply_archive_filter()
+            self._set_archive_loading(False, f"Archivliste geladen: {len(cache_list)} Archive")
 
-            if missing_count == 0:
-                self._set_archive_loading(False, f"Archivliste geladen: {len(rows)} Archive")
-                self._show_notice(f"Archivliste geladen: {len(rows)} Archive.", level="success")
-            else:
-                self._set_archive_loading(True, f"Archivgrößen werden geladen (0/{missing_count})...")
-                threading.Thread(
-                    target=self._populate_archive_sizes_async, args=(rows, token, profile_name), daemon=True
-                ).start()
-        except Exception as exc:
-            self._set_archive_loading(False)
-            messagebox.showerror("Fehler", str(exc))
+        self._daemon_call_async("list_archives", {"job": job_name}, on_done=done, slow=True)
 
     def _set_archive_loading(self, is_loading, text=""):
         if hasattr(self, "archive_status_var"):
@@ -4636,25 +4553,18 @@ class BorgBackupGUI:
             self._set_archive_loading(True, f"Archivgrößen werden geladen ({index}/{total})...")
 
     def _query_archive_size_label(self, archive_name):
-        if self.backup_running:
+        if self.backup_running or not self.daemon_online:
             return "n/a"
-        repo = self._borg_repo()
-        env = self._borg_env()
-        cmd = [BORG_BIN, "info", "--bypass-lock", f"{repo}::{archive_name}"]
-        cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
-
+        job = self.config_data.get("profile_name", "Standard")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
-        except Exception:
+            result = self.ipc_slow.call("archive_info", {"job": job, "archive": archive_name})
+        except IpcError:
             return "n/a"
-
-        if result.returncode != 0:
-            return "n/a"
-
-        match = re.search(r"This archive:\s+([0-9.,]+\s+[KMGTPE]?i?B)", result.stdout)
-        if match:
-            return match.group(1)
-
+        size = (result or {}).get("original_size") or (result or {}).get("size")
+        if isinstance(size, (int, float)):
+            return self._human_size(size)
+        if isinstance(size, str) and size.strip():
+            return size.strip()
         return "n/a"
 
     def _human_size(self, size_bytes):
@@ -4669,104 +4579,103 @@ class BorgBackupGUI:
         if not selected:
             messagebox.showerror("Fehler", "Kein Archiv ausgewählt.")
             return
-
         name = self.tree.item(selected[0], "text")
-        repo = self._borg_repo()
-        os.makedirs(self.mount_point, exist_ok=True)
+        job = self.config_data.get("profile_name", "Standard")
+        self._show_notice(f"Hänge Archiv {name} ein …", level="info")
 
-        env = self._borg_env()
-        cmd = [BORG_BIN, "mount", "--lock-wait=30", f"{repo}::{name}", self.mount_point]
-        cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
-
-        self._append_backup_log(f"Mounte Archiv {name}...\n")
-        self.archive_runner.stop_flag = False
-        self.archive_runner.run_capture(cmd, env=env, done_callback=self._on_mount_done)
-
-    def _on_mount_done(self, result):
-        ex = result.get("exception", "")
-        if ex:
-            messagebox.showerror("Fehler", str(ex))
+        def done(result, error):
+            if error is not None:
+                messagebox.showerror("Mount", error.message)
+                return
+            path = str((result or {}).get("path") or "")
+            self.mount_active = True
+            self.mount_point = path
+            self.mounted_archive_name = name
             if hasattr(self, "mount_btn"):
-                self.mount_btn.config(text="Ausgewähltes Archiv mounten")
-            return
-        if result["exit_code"] != 0:
-            err = result["stderr"].strip() or result["stdout"].strip() or "Unbekannter Fehler"
-            messagebox.showerror("Fehler", f"Mount fehlgeschlagen:\n{err}")
-            if hasattr(self, "mount_btn"):
-                self.mount_btn.config(text="Ausgewähltes Archiv mounten")
-            return
-        self.mount_active = True
-        selected = self.tree.selection()
-        if selected:
-            self.mounted_archive_name = self.tree.item(selected[0], "text")
-        if hasattr(self, "mount_btn"):
-            self.mount_btn.config(text="Unmounten")
-        if hasattr(self, "open_btn"):
-            self.open_btn.config(state="normal")
-        self._show_notice(f"Archiv gemountet auf {self.mount_point}", level="success", timeout_ms=5000)
+                self.mount_btn.config(text="Aushängen")
+            if hasattr(self, "open_btn"):
+                self.open_btn.config(state="normal")
+            self._show_notice(f"Archiv gemountet auf {path}", level="success", timeout_ms=5000)
+            self._refresh_daemon_status()
+
+        self._daemon_call_async("mount", {"job": job, "archive": name}, on_done=done, slow=True)
 
     def _delete_archive(self):
         selected = self.tree.selection()
         if not selected:
             messagebox.showerror("Fehler", "Kein Archiv ausgewählt.")
             return
-
         name = self.tree.item(selected[0], "text")
         if not messagebox.askyesno("Löschen", f"Archiv '{name}' wirklich löschen?"):
             return
-
-        repo = self._borg_repo()
-        env = self._borg_env()
-        cmd = [BORG_BIN, "delete", "--lock-wait=30", f"{repo}::{name}"]
-        cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
-
+        job = self.config_data.get("profile_name", "Standard")
         self._append_backup_log(f"Lösche Archiv {name}...\n")
-        self.archive_runner.stop_flag = False
-        self.archive_runner.run_capture(cmd, env=env, done_callback=self._on_delete_done)
 
-    def _on_delete_done(self, result):
-        ex = result.get("exception", "")
-        if ex:
-            messagebox.showerror("Fehler", str(ex))
-            return
-        if result["exit_code"] != 0:
-            err = result["stderr"].strip() or result["stdout"].strip() or "Unbekannter Fehler"
-            messagebox.showerror("Fehler", f"Löschen fehlgeschlagen:\n{err}")
-            return
-        messagebox.showinfo("Info", "Archiv geloescht.")
-        # Cache invalidieren
-        pname = self.config_data.get("profile_name", "Standard")
-        self.archive_cache.pop(pname, None)
-        self._load_archive_list()
+        def done(result, error):
+            if error is not None:
+                messagebox.showerror("Löschen", error.message)
+                return
+            self._show_notice(f"Löschen von {name} an den Dienst übergeben.", level="info")
+            self._refresh_daemon_status()
+
+        self._daemon_call_async("delete_archive", {"job": job, "archive": name}, on_done=done, slow=True)
 
     def _start_restore(self):
-        self._save_config()
+        if not self.daemon_online:
+            self._show_notice("Backup-Dienst nicht verbunden.", level="warning")
+            return
         archive = self.restore_archive_var.get().strip()
         target = self.restore_path_var.get().strip()
-
+        job = self.restore_job_var.get().strip() or self.config_data.get("profile_name", "Standard")
         if not archive or not target:
             messagebox.showerror("Fehler", "Archivname und Zielverzeichnis angeben.")
             return
-        if not os.path.isdir(target):
-            messagebox.showerror("Fehler", "Zielverzeichnis existiert nicht.")
+        if not target.startswith("/"):
+            messagebox.showerror("Fehler", "Zielverzeichnis muss ein absoluter Pfad sein.")
             return
-
+        if target == "/" and not messagebox.askyesno(
+            "Warnung",
+            "Ziel „/“ überschreibt Systemdateien des laufenden Systems.\n\nWirklich fortfahren?",
+        ):
+            return
+        paths = []
+        if hasattr(self, "restore_paths_text"):
+            paths = [line.strip() for line in self.restore_paths_text.get("1.0", tk.END).splitlines() if line.strip()]
         self._append_restore_log(f"Starte Restore von {archive} nach {target}...\n")
-        repo = self._borg_repo()
-        env = self._borg_env()
-        cmd = [BORG_BIN, "extract", "--list", "--lock-wait=30", f"{repo}::{archive}"]
-        cmd, env = self._command_with_privilege(cmd, env, needs_root=False)
-        self.restore_runner.stop_flag = False
-        self.restore_runner.run(cmd, env=env, cwd=target, done_callback=self._on_restore_done)
+        self.restore_progress["value"] = 0
+        self.restore_progress_var.set("Wiederherstellung wird gestartet …")
 
-    def _on_restore_done(self, result):
-        if result.get("exception"):
-            self._append_restore_log(f"\n[FEHLER] {result['exception']}\n")
+        def done(result, error):
+            if error is not None:
+                self.restore_progress_var.set("")
+                messagebox.showerror("Wiederherstellung", error.message)
+                return
+            if isinstance(result, dict):
+                self.current_restore_id = str(result.get("id") or "")
+            self._update_action_buttons()
+            self._refresh_daemon_status()
+
+        self._daemon_call_async(
+            "extract",
+            {"job": job, "archive": archive, "target": target, "paths": paths},
+            on_done=done,
+            slow=True,
+        )
+
+    def _cancel_restore(self) -> None:
+        current = self.daemon_status.get("current") or {}
+        run_id = str(self.current_restore_id or current.get("id") or "")
+        if not run_id:
             return
-        if result.get("exit_code", -1) == 0:
-            self._append_restore_log("\n[OK] Restore erfolgreich!\n")
-        else:
-            self._append_restore_log(f"\n[FEHLER] Exit {result.get('exit_code')}\n")
+
+        def done(result, error):
+            if error is not None:
+                self._show_notice(f"Abbruch fehlgeschlagen: {error.message}", level="error")
+                return
+            self._append_restore_log("\n[INFO] Abbruch gesendet.\n")
+            self._refresh_daemon_status()
+
+        self._daemon_call_async("cancel", {"id": run_id}, on_done=done)
 
     def _build_accounts_tab(self) -> None:
         tab = self.tab_accounts
@@ -5589,6 +5498,13 @@ class BorgBackupGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def _install_app_update(self) -> None:
+        if self.backup_running or self.daemon_busy:
+            self._show_notice(
+                "Update während eines laufenden Backup-/Restore-Auftrags gesperrt.",
+                level="warning",
+                timeout_ms=10000,
+            )
+            return
         self._set_update_status(f"Version {__version__} — lade Update…")
 
         def worker() -> None:
@@ -5728,8 +5644,8 @@ class BorgBackupGUI:
 
         ttk.Label(
             frame,
-            text="Hinweis: Für Full-System-Backups ohne Passwortabfrage später\n"
-            "install_nopasswd_rule.sh ausführen (opt-in, enge sudoers-Regel).",
+            text="Hinweis: Backups führt der Systemdienst borg-backup-guid mit root-Rechten aus.\n"
+            "Konfiguration und Wiederherstellung fragen bei Bedarf nach dem Admin-Passwort (polkit).",
             style="Muted.TLabel",
         ).grid(row=8, column=0, columnspan=2, sticky="w", padx=5, pady=6)
 
@@ -5814,18 +5730,7 @@ class BorgBackupGUI:
                 self._refresh_sources_tree()
             dialog.destroy()
             self._show_notice("Erste Einrichtung abgeschlossen.", level="success")
-            if messagebox.askyesno(
-                "Privilege-Setup",
-                "Soll jetzt die optionale NOPASSWD-Regel für Borg eingerichtet werden?\n"
-                "(benötigt Admin-Rechte, eng begrenzte sudoers-Regel)",
-                parent=self.master,
-            ):
-                script = Path(__file__).resolve().parent / "install_nopasswd_rule.sh"
-                if script.is_file():
-                    try:
-                        subprocess.Popen(["bash", str(script)], start_new_session=True)
-                    except OSError as exc:
-                        messagebox.showerror("Privilege", str(exc))
+            self._push_config_if_changed(force=True)
 
         btns = ttk.Frame(frame)
         btns.grid(row=9, column=0, columnspan=2, sticky="ew", pady=16)
@@ -5835,9 +5740,11 @@ class BorgBackupGUI:
         ttk.Button(btns, text="Später", command=lambda: _finish(True)).pack(side="left")
 
 
-def main():
+def main(argv: list[str] | None = None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    start_hidden = "--tray" in args
     root = tk.Tk()
-    BorgBackupGUI(root)
+    BorgBackupGUI(root, start_hidden=start_hidden)
     root.mainloop()
 
 

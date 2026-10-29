@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot: switch from git-checkout + start_gui.sh to the system .deb install.
-# Keeps ~/.config/borg-backup-gui/ (passphrase, jobs, protocols, nopasswd marker).
+# Keeps ~/.config/borg-backup-gui/ (UI prefs, protocols). Secrets migrate into the service.
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -92,4 +92,4 @@ fi
 
 echo ""
 echo "Fertig. Alltag: App-Menü oder 'borg-backup-gui'. Autostart: Login."
-echo "NOPASSWD (falls noch nicht): /usr/lib/borg-backup-gui/install_nopasswd_rule.sh"
+echo "Dienst: systemctl status borg-backup-guid"

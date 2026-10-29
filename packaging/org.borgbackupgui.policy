@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Borg Backup GUI</vendor>
+  <vendor_url>https://github.com/AniGerm/Borg-Backup-GUI</vendor_url>
+  <icon_name>borg-backup-gui</icon_name>
+
+  <action id="org.borgbackupgui.status">
+    <description>View backup status, logs and archive lists</description>
+    <description xml:lang="de">Backup-Status, Protokolle und Archivlisten anzeigen</description>
+    <message>Authentication is required to view the backup status</message>
+    <message xml:lang="de">Zum Anzeigen des Backup-Status ist eine Authentifizierung erforderlich</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.borgbackupgui.run">
+    <description>Start or cancel a configured backup</description>
+    <description xml:lang="de">Konfiguriertes Backup starten oder abbrechen</description>
+    <message>Authentication is required to start or cancel a backup</message>
+    <message xml:lang="de">Zum Starten oder Abbrechen eines Backups ist eine Authentifizierung erforderlich</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.borgbackupgui.configure">
+    <description>Change backup sources, targets, schedules and credentials</description>
+    <description xml:lang="de">Backup-Quellen, Ziele, Zeitpläne und Zugangsdaten ändern</description>
+    <message>Authentication is required to change the backup configuration</message>
+    <message xml:lang="de">Zum Ändern der Backup-Konfiguration ist eine Authentifizierung erforderlich</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.borgbackupgui.restore">
+    <description>Restore, mount or delete backup archives</description>
+    <description xml:lang="de">Backup-Archive wiederherstellen, einhängen oder löschen</description>
+    <message>Authentication is required to restore, mount or delete backup archives</message>
+    <message xml:lang="de">Zum Wiederherstellen, Einhängen oder Löschen von Archiven ist eine Authentifizierung erforderlich</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

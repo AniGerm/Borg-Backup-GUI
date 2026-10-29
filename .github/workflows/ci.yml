@@ -14,7 +14,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y python3-tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-gi gir1.2-ayatanaappindicator3-0.1 \
+            python3-pil python3-fonttools python3-defusedxml borgbackup policykit-1
       - name: venv + deps
         run: |
           python3 -m venv .venv
@@ -24,3 +27,49 @@ jobs:
         run: ./QA.sh
       - name: Pytest
         run: .venv/bin/pytest -q
+      - name: Borg integration smoke
+        run: .venv/bin/pytest -q tests/test_borg_integration.py
+      - name: Deb build smoke
+        run: |
+          chmod +x packaging/build_deb.sh start_gui.sh
+          ./packaging/build_deb.sh
+          test -f dist/borg-backup-gui_*_amd64.deb
+          if command -v lintian >/dev/null 2>&1; then
+            lintian --fail-on error dist/borg-backup-gui_*_amd64.deb || true
+          fi
+
+  deb-smoke:
+    needs: qa
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:22.04", "ubuntu:24.04"]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build + runtime deps
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y python3 python3-pip python3-venv python3-tk python3-gi \
+            gir1.2-ayatanaappindicator3-0.1 python3-pil python3-fonttools python3-defusedxml \
+            borgbackup policykit-1 openssh-client dpkg-dev systemd
+      - name: Build and install .deb
+        run: |
+          chmod +x packaging/build_deb.sh start_gui.sh
+          ./packaging/build_deb.sh
+          apt-get install -y ./dist/borg-backup-gui_*_amd64.deb
+      - name: Smoke checks
+        run: |
+          test -x /usr/bin/borg-backup-gui
+          test -x /usr/bin/borg-backup-guid
+          test -f /lib/systemd/system/borg-backup-guid.service
+          test -f /usr/share/polkit-1/actions/org.borgbackupgui.policy
+          test -f /etc/xdg/autostart/borg-backup-gui.desktop
+          systemd-analyze verify /lib/systemd/system/borg-backup-guid.service || true
+          pkaction --action-id org.borgbackupgui.run
+          python3 -c "import sys; sys.path.insert(0,'/usr/lib/borg-backup-gui'); import borg_engine, borg_daemon, borg_ipc, borg_sysconfig"
+          test ! -f /etc/sudoers.d/99-borg-backup-gui

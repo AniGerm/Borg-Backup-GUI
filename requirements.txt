@@ -1,3 +1,4 @@
-pystray>=0.19.5
+# Packaged installs use apt (python3-pil, python3-gi, …) plus vendored fpdf2.
+# Development checkout may still pip-install these for local runs:
 pillow>=10.0.0
 fpdf2>=2.7.0

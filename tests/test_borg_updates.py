@@ -37,4 +37,13 @@ def test_release_to_deb_info_missing() -> None:
 
 def test_app_version_reads_gui_file() -> None:
     ver = bu.app_version()
-    assert ver.startswith("2.")
+    assert ver[0].isdigit()
+
+
+def test_expected_sha256_from_sums() -> None:
+    text = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899  borg-backup-gui_3.0.0_amd64.deb\n"
+    # pad to 64 hex
+    digest = "a" * 64
+    text = f"{digest}  borg-backup-gui_3.0.0_amd64.deb\n"
+    assert bu._expected_sha256_from_sums(text, "borg-backup-gui_3.0.0_amd64.deb") == digest
+    assert bu._expected_sha256_from_sums(text, "other.deb") is None

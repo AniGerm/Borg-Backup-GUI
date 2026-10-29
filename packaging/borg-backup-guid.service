@@ -1,0 +1,36 @@
+[Unit]
+Description=Borg Backup GUI service (scheduled and manual Borg backups)
+Documentation=https://github.com/AniGerm/Borg-Backup-GUI
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/borg-backup-guid
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillMode=mixed
+KillSignal=SIGTERM
+RuntimeDirectory=borg-backup-gui
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=no
+StateDirectory=borg-backup-gui
+StateDirectoryMode=0700
+ConfigurationDirectory=borg-backup-gui
+ConfigurationDirectoryMode=0700
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Backups must read every file and restores/mounts must land in the host
+# mount namespace, so no ProtectSystem/PrivateTmp (they create a private namespace).
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

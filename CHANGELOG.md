@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.0-rc1
+
+- Root-Systemdienst `borg-backup-guid` (systemd) führt Backups und Zeitpläne aus
+- GUI steuert den Dienst über Unix-Socket + polkit (kein NOPASSWD-sudo mehr)
+- Systemconfig unter `/etc/borg-backup-gui` (Secrets root-only), Migration aus 2.x
+- Wiederherstellung über den Dienst (Archivliste, Pfadfilter, Fortschritt)
+- Deb ohne Runtime-pip; Tray via AppIndicator; Autostart im Tray-Modus
+- Update prüft `SHA256SUMS` wenn im Release vorhanden
+
 ## 2.0.4
 
 - Zeitplan pro Backup-Volumen (Profil/Job) mit Übersicht

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.3
+
+- Release zum Testen des GitHub-Auto-Updates (inkl. Neustart-UX und Versions-Footer)
+
+## 2.0.2
+
+- Update: warte auf Installationsende, dann Neustart-Dialog
+- Footer mit aktueller Versionsnummer auf dem Hauptfenster
+
 ## 2.0.1
 
 - Clearer auto-update status when GitHub latest has no `.deb` asset

@@ -248,22 +248,32 @@ def install_update() -> dict[str, Any]:
     if helper is None and local_helper.is_file():
         helper = local_helper
 
+    exit_path = _cache_dir() / "install.exit"
+    try:
+        exit_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     if helper is not None:
-        script = f"""#!/bin/bash
+        install_cmd = f"pkexec {_shell_quote(str(helper))} {_shell_quote(deb_path)}"
+    else:
+        install_cmd = (
+            f"export DEBIAN_FRONTEND=noninteractive; "
+            f"pkexec apt-get install -y --reinstall {_shell_quote(deb_path)} "
+            f"|| pkexec dpkg -i {_shell_quote(deb_path)}"
+        )
+
+    script = f"""#!/bin/bash
 trap '' HUP
 exec >>{_shell_quote(str(log_path))} 2>&1
 echo "==== $(date -Is) borg-backup-gui update ===="
-pkexec {_shell_quote(str(helper))} {_shell_quote(deb_path)}
-"""
-    else:
-        script = f"""#!/bin/bash
-trap '' HUP
-exec >>{_shell_quote(str(log_path))} 2>&1
-echo "==== $(date -Is) borg-backup-gui update (fallback) ===="
-export DEBIAN_FRONTEND=noninteractive
-pkexec apt-get install -y --reinstall {_shell_quote(deb_path)} \\
-  || pkexec dpkg -i {_shell_quote(deb_path)}
-"""
+set +e
+{install_cmd}
+rc=$?
+echo "INSTALL_EXIT=$rc"
+echo "$rc" > {_shell_quote(str(exit_path))}
+exit $rc
+"""  # noqa: S608
     script_path = _cache_dir() / "run-install.sh"
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o755)
@@ -283,7 +293,28 @@ pkexec apt-get install -y --reinstall {_shell_quote(deb_path)} \\
             start_new_session=True,
             env=os.environ.copy(),
         )
-    return _set_state(phase="installing", error=None)
+    return _set_state(phase="installing", error=None, download_path=deb_path)
+
+
+def install_exit_path() -> Path:
+    return _cache_dir() / "install.exit"
+
+
+def poll_install_finished(timeout_sec: float = 300.0, interval_sec: float = 0.5) -> dict[str, Any]:
+    """Block until install.exit appears or timeout. Returns status snapshot."""
+    deadline = time.time() + max(5.0, timeout_sec)
+    path = install_exit_path()
+    while time.time() < deadline:
+        if path.is_file():
+            try:
+                code = int(path.read_text(encoding="utf-8").strip() or "1")
+            except ValueError:
+                code = 1
+            if code == 0:
+                return _set_state(phase="installed", error=None)
+            return _set_state(phase="error", error=f"Installation fehlgeschlagen (Exit {code})")
+        time.sleep(interval_sec)
+    return _set_state(phase="error", error="Installation: Timeout (pkexec abgebrochen?)")
 
 
 def download_and_install(progress_cb: Any | None = None) -> dict[str, Any]:

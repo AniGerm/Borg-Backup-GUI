@@ -4,7 +4,7 @@ Borg Backup GUI - Komplettes Backup-Management mit Borg und Storage Box (SSH).
 Funktioniert als root für vollständige Systemsicherungen.
 """
 
-__version__ = "2.0.1"
+__version__ = "2.0.3"
 
 import datetime
 import fcntl
@@ -12,9 +12,11 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -278,7 +280,7 @@ class BorgBackupGUI:
             master.wm_class("BorgBackupGUI")
         except Exception:
             pass
-        master.title("Borg Backup GUI")
+        master.title(f"Borg Backup GUI v{__version__}")
         master.geometry("1100x780")
         self.ui = {
             "bg": "#0b1220",
@@ -456,14 +458,28 @@ class BorgBackupGUI:
 
         self._set_window_icon()
 
-        self.notebook = ttk.Notebook(master)
-        self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
-
+        self.footer = tk.Frame(master, bg="#111827")
+        self.footer.pack(fill="x", side="bottom")
+        self.version_footer_var = tk.StringVar(value=f"v{__version__}")
+        self.version_footer_label = tk.Label(
+            self.footer,
+            textvariable=self.version_footer_var,
+            anchor="e",
+            bg="#111827",
+            fg="#64748b",
+            padx=12,
+            pady=6,
+            font=("IBM Plex Sans", 9),
+        )
+        self.version_footer_label.pack(side="right")
         self.notice_var = tk.StringVar(value="")
         self.notice_label = tk.Label(
-            master, textvariable=self.notice_var, anchor="w", bg="#111827", fg="#cbd5e1", padx=10, pady=6
+            self.footer, textvariable=self.notice_var, anchor="w", bg="#111827", fg="#cbd5e1", padx=10, pady=6
         )
-        self.notice_label.pack(fill="x", side="bottom")
+        self.notice_label.pack(side="left", fill="x", expand=True)
+
+        self.notebook = ttk.Notebook(master)
+        self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
         self.tab_dashboard = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_dashboard, text="Dashboard")
@@ -5301,17 +5317,29 @@ class BorgBackupGUI:
                         self.master.after(0, lambda p=pct: self._set_update_status(f"Download… {p}%"))
 
                     result = borg_updates.download_and_install(progress_cb=on_progress)
+                    if result.get("phase") == "installing":
+                        self.master.after(
+                            0,
+                            lambda: self._set_update_status("Installation läuft — Admin-Dialog bestätigen…"),
+                        )
+                        result = borg_updates.poll_install_finished(timeout_sec=600.0)
             except Exception as exc:
                 result = {"phase": "error", "error": str(exc)}
 
             def done() -> None:
-                if result.get("phase") == "installing":
-                    self._set_update_status("Installation gestartet — App danach neu starten")
+                if result.get("phase") == "installed":
+                    latest = result.get("latest_version") or "?"
+                    self._set_update_status(f"Update v{latest} installiert — Neustart")
                     self._show_notice(
-                        "Update-Installation gestartet (pkexec). Bitte App danach neu starten.",
+                        f"Update v{latest} installiert. Bitte App neu starten.",
                         level="success",
-                        timeout_ms=12000,
+                        timeout_ms=15000,
                     )
+                    if messagebox.askyesno(
+                        "Update installiert",
+                        f"Version {latest} wurde installiert.\n\nApp jetzt neu starten?",
+                    ):
+                        self._relaunch_after_update()
                 else:
                     err = result.get("error") or "Update fehlgeschlagen"
                     self._set_update_status(f"Version {__version__} — {err}")
@@ -5320,6 +5348,33 @@ class BorgBackupGUI:
             self.master.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _relaunch_after_update(self) -> None:
+        """Quit current process and start the installed launcher after a short delay."""
+        launcher = shutil.which("borg-backup-gui")
+        if launcher:
+            restart_cmd = f"sleep 0.9; exec {shlex.quote(launcher)}"
+        else:
+            restart_cmd = f"sleep 0.9; exec {shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))}"
+        try:
+            subprocess.Popen(
+                ["bash", "-c", restart_cmd],
+                start_new_session=True,
+                cwd=str(Path.home()),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Neustart",
+                f"Automatischer Neustart fehlgeschlagen: {exc}\nBitte App manuell neu starten.",
+            )
+            return
+        try:
+            self.master.destroy()
+        except Exception:
+            pass
+        raise SystemExit(0)
 
     def _maybe_show_first_run_wizard(self) -> None:
         if self.config_data.get("setup_complete"):

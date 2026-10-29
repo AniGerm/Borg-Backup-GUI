@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build an amd64 .deb for Borg Backup GUI (run from repo root or packaging/).
+# Build an amd64 .deb for Borg Backup GUI (CI / GitHub Actions release.yml).
+# Production releases: tag vX.Y.Z and push — do not publish local .deb builds.
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"

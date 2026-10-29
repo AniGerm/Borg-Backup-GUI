@@ -1,0 +1,13 @@
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[lint.per-file-ignores]
+# Optionale GUI-Deps und Legacy-Catch in der Desktop-App
+"borg_backup_gui.py" = ["E402"]
+
+[format]
+quote-style = "double"

@@ -3,12 +3,24 @@ repos:
     hooks:
       - id: ruff
         name: ruff (Python Linter)
-        entry: .venv/bin/ruff check borg_backup_gui.py
+        entry: .venv/bin/ruff check borg_backup_gui.py borg_model.py
+        language: system
+        pass_filenames: false
+
+      - id: ruff-format
+        name: ruff (Python Format Check)
+        entry: .venv/bin/ruff format --check borg_backup_gui.py borg_model.py
         language: system
         pass_filenames: false
 
       - id: mypy
         name: mypy (Python Type-Check)
-        entry: .venv/bin/mypy borg_backup_gui.py
+        entry: .venv/bin/mypy --explicit-package-bases borg_backup_gui.py borg_model.py
+        language: system
+        pass_filenames: false
+
+      - id: qa-score
+        name: QA.sh score gate (>=95)
+        entry: ./QA.sh
         language: system
         pass_filenames: false

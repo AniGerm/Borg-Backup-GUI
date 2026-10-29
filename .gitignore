@@ -1,3 +1,10 @@
 .venv/
 __pycache__/
 *.pyc
+packaging/*.deb
+dist/
+*.egg-info/
+.pytest_cache/
+.cursor/
+.mypy_cache/
+.ruff_cache/

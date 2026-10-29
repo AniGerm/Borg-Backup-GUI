@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk dpkg-dev
+      - name: venv + deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -U pip
+          .venv/bin/pip install -r requirements-dev.txt
+      - name: QA
+        run: ./QA.sh
+      - name: Pytest
+        run: .venv/bin/pytest -q
+      - name: Build .deb
+        run: |
+          chmod +x packaging/build_deb.sh
+          ./packaging/build_deb.sh
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,200 +1,134 @@
-<h1 align="center">🔄 Borg Backup GUI</h1>
+<h1 align="center">Borg Backup GUI</h1>
 
 <p align="center">
-  <strong>Desktop-Anwendung für Borg-Backups</strong><br>
-  <em>mit Unterstützung für SSH (Storage Box), S3 Object Storage und lokale Laufwerke</em>
+  <strong>System backups with Borg — verified, multi-target, auditable.</strong><br>
+  <em>Full-disk Linux backups with Canary restore checks, multiple destinations, and PDF protocols.</em>
 </p>
 
 <p align="center">
   <img src="assets/borg-backup-gui.svg" width="128" height="128" alt="Borg Backup GUI Logo">
 </p>
 
+<p align="center">
+  <a href="#deutsch">Deutsch</a> · <a href="#english">English</a>
+</p>
+
 ---
 
-🇩🇪 **Deutsch** • [🇬🇧 English](#english)
+<a id="deutsch"></a>
 
----
+## Deutsch
 
-## 🇩🇪 Deutsche Version
+### Warum diese App?
 
-### Überblick
+[Vorta](https://github.com/borgbase/vorta) und [Pika Backup](https://gitlab.gnome.org/World/pika-backup) sind hervorragend für persönliche Home-Ordner.  
+**Borg Backup GUI** zielt auf **komplette Systemsicherungen**: Root-Zugriff, Canary-Restore-Test, mehrere Backup-Ziele, DSGVO-taugliche PDF-Protokolle.
 
-**Borg Backup GUI** ist eine benutzerfreundliche Desktop-Oberfläche (Tkinter) für [BorgBackup](https://www.borgbackup.org/) – ein leistungsstarkes, deduplizierendes Backup-Programm.
-
-Die Anwendung ermöglicht:
-
-- **Automatische, verschlüsselte Backups** auf verschiedene Ziele
-- **Mehrere Backup-Profile** mit unterschiedlichen Konfigurationen
-- **S3 Object Storage** (z. B. Hetzner Object Storage, AWS S3, MinIO)
-- **SSH / Storage Box** (Hetzner, beliebiger SSH-Server)
-- **Lokale Laufwerke** (USB-Festplatten, zweite SSD/HDD)
-- **Systemweite Backups** mit automatischer sudo-Erhöhung
-- **Tray-Icon** mit Live-Status und Schnellzugriff
-- **Zeitplanung** (täglich, stündlich, manuell)
-- **Wartung** (Prune, Check, Compact)
-- **Archiv-Verwaltung** mit Liste, Mount/Unmount, Löschen
-- **Wiederherstellung** einzelner Archive
-
-### Systemvoraussetzungen
-
-| Komponente | Anforderung |
-|------------|-------------|
-| Betriebssystem | Linux (getestet auf Ubuntu 24.04+) |
-| Python | 3.10+ |
-| BorgBackup | `apt install borgbackup` |
-| Tkinter | `apt install python3-tk` |
-| Tray-Icon (optional) | `pip3 install pystray pillow` |
+| | Vorta / Pika | Borg Backup GUI |
+|--|--------------|-----------------|
+| Full-System (`/`) + geführtes sudo | eingeschränkt / nein | ja |
+| Canary Restore-Test | nein | ja |
+| Multi-Ziel + Accounts | Profile | ja |
+| PDF-Protokoll + Retention | nein | ja |
 
 ### Installation
 
+**Debian/Ubuntu (.deb)** — von [GitHub Releases](https://github.com/AniGerm/Borg-Backup-GUI/releases):
+
 ```bash
-# 1. Repository klonen
+sudo apt install ./borg-backup-gui_*_amd64.deb
+borg-backup-gui
+```
+
+Das Paket liefert App-Menü, Icon und **Autostart** (`/etc/xdg/autostart/`).  
+Config bleibt unter `~/.config/borg-backup-gui/`.
+
+**Von Git-Checkout auf .deb umsteigen** (eine Aktion):
+
+```bash
+cd /pfad/zu/Borg-Backup-GUI
+./packaging/migrate-to-deb.sh
+```
+
+Stoppt die Checkout-GUI, baut/installiert das Deb, entfernt alte User-Launcher, prüft Icon/Autostart und startet die System-App.
+
+**Aus dem Quellcode (Entwicklung):**
+
+```bash
 git clone https://github.com/AniGerm/Borg-Backup-GUI.git
 cd Borg-Backup-GUI
-
-# 2. Starten (erstellt automatisch venv + installiert Abhängigkeiten)
 ./start_gui.sh
-
-# Oder manuell:
-python3 borg_backup_gui.py
 ```
 
-Beim ersten Start führt die App durch die Einrichtung:
-1. **Sudo-NOPASSWD-Regel** für automatische Backups
-2. **Desktop-Launcher** fürs App-Menü und Autostart
+Voraussetzungen: Linux, Python 3.10+, `borgbackup`, `python3-tk`.
 
-### Erste Schritte
+### Schnellstart
 
-1. **App starten**: `./start_gui.sh`
-2. **Profil anlegen**: Dashboard → "➕ Neues Profil" → Typ wählen
-3. **SSH-Profil**: Repository-URL, SSH-Key, Passphrase
-4. **S3-Profil**: Bucket-Name, Access Key, Secret Key, Endpoint
-5. **Lokales Profil**: Ordner-Pfad (z. B. `/mnt/backup/borg-repo`)
-6. **Backup starten**: Backup-Tab → Profil auswählen → "Backup jetzt ausführen"
+1. App starten → **First-Run-Assistent** (Ziel, Passphrase, Quellen, sudo-Hinweis).
+2. Optional: `install_nopasswd_rule.sh` für passwortfreie Systembackups (eng begrenzte sudoers-Regel).
+3. Backup-Tab → Quellen prüfen → **Backup starten**.
+4. Dashboard: Canary = OK; Protokoll-Tab für PDFs.
 
-### Backup-Strategie (Dual-Backup)
+### Updates
 
-Für maximale Sicherheit: **Zwei Profile mit gleichem Zeitplan**
+Die App prüft optional GitHub Releases (`AniGerm/Borg-Backup-GUI`) auf ein neueres  
+`borg-backup-gui_*.deb`, lädt es herunter und installiert es per `pkexec`  
+(`apply-update.sh` — analog Inbox/LaborCheck). Schalter im Dashboard: **Software-Update**.
 
-```yaml
-Profil 1: "Hetzner Cloud" (Typ: SSH)
-  Zeitplan: täglich 03:00
+### Sicherheit
 
-Profil 2: "Lokale Platte" (Typ: local)
-  Zeitplan: täglich 03:00
-  Pfad: /mnt/usb-backup/borg-repo
-```
+- Secrets liegen in `~/.config/borg-backup-gui/config.json` (Modus `0600`) — siehe [SECURITY.md](SECURITY.md).
+- NOPASSWD-Setup ist **opt-in**, nie stillschweigend durch das Deb-Paket.
 
-Beide laufen automatisch nacheinander.
+### Qualitätssicherung
 
-### Projektstruktur
-
-```
-borg_backup_gui.py           # Haupt-App (ca. 2900 Zeilen)
-borg-backup-gui.desktop      # Desktop-Launcher
-start_gui.sh                 # Starter-Skript
-install_desktop_launcher.sh  # Launcher-Installation
-install_nopasswd_rule.sh     # Sudo-NOPASSWD-Einrichtung
-restore.sh                   # CLI-Restore für Disaster Recovery
-assets/
-  borg-backup-gui.svg         # App-Icon
-plans/
-  plan.md                    # Technischer Entwicklungsplan
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+./QA.sh
+.venv/bin/pytest -q
 ```
 
 ### Lizenz
 
-MIT License – siehe [LICENSE](LICENSE).
+[GPL-3.0](LICENSE)
 
 ---
 
+<a id="english"></a>
+
 ## English
 
-### Overview
+### Why this app?
 
-**Borg Backup GUI** is a user-friendly desktop interface (Tkinter) for [BorgBackup](https://www.borgbackup.org/) – a powerful, deduplicating backup tool.
+[Vorta](https://github.com/borgbase/vorta) and [Pika Backup](https://gitlab.gnome.org/World/pika-backup) focus on personal home data.  
+**Borg Backup GUI** targets **full-system Linux backups**: root access, Canary restore verification, multi-destination jobs, and PDF audit reports.
 
-The application provides:
+### Install
 
-- **Automatic, encrypted backups** to multiple destinations
-- **Multiple backup profiles** with different configurations
-- **S3 Object Storage** (Hetzner Object Storage, AWS S3, MinIO, etc.)
-- **SSH / Storage Box** (Hetzner, any SSH server)
-- **Local drives** (USB hard drives, secondary SSD/HDD)
-- **System-wide backups** with automatic privilege elevation
-- **System tray icon** with live status and quick actions
-- **Scheduling** (daily, interval, manual)
-- **Maintenance** (prune, check, compact)
-- **Archive management** with list, mount/unmount, delete
-- **Restore** individual archives
-
-### Requirements
-
-| Component | Requirement |
-|-----------|-------------|
-| OS | Linux (tested on Ubuntu 24.04+) |
-| Python | 3.10+ |
-| BorgBackup | `apt install borgbackup` |
-| Tkinter | `apt install python3-tk` |
-| Tray icon (optional) | `pip3 install pystray pillow` |
-
-### Installation
+Download the `.deb` from [Releases](https://github.com/AniGerm/Borg-Backup-GUI/releases) (includes app menu, icon, and login autostart), or migrate from a git checkout:
 
 ```bash
-# 1. Clone repository
+./packaging/migrate-to-deb.sh
+```
+
+For development:
+
+```bash
 git clone https://github.com/AniGerm/Borg-Backup-GUI.git
 cd Borg-Backup-GUI
-
-# 2. Start (auto-creates venv + installs dependencies)
 ./start_gui.sh
-
-# Or manually:
-python3 borg_backup_gui.py
 ```
 
-On first launch, the app guides you through setup:
-1. **sudo NOPASSWD rule** for automatic backups
-2. **Desktop launcher** for app menu and autostart
+### Quick start
 
-### Quick Start
+1. Launch → first-run wizard (destination, passphrase, sources, privilege hint).
+2. Optionally run `install_nopasswd_rule.sh` for unattended system backups.
+3. Start a backup; confirm Canary OK on the dashboard.
 
-1. **Launch**: `./start_gui.sh`
-2. **Create profile**: Dashboard → "New Profile" → choose type
-3. **SSH profile**: Repository URL, SSH key, passphrase
-4. **S3 profile**: Bucket name, access key, secret key, endpoint
-5. **Local profile**: Folder path (e.g., `/mnt/backup/borg-repo`)
-6. **Start backup**: Backup tab → select profile → "Run backup now"
+### Security
 
-### Dual Backup Strategy
-
-For maximum safety: **Two profiles with the same schedule**
-
-```yaml
-Profile 1: "Cloud Backup" (Type: SSH)
-  Schedule: daily at 03:00
-
-Profile 2: "Local Drive" (Type: local)
-  Schedule: daily at 03:00
-  Path: /mnt/usb-backup/borg-repo
-```
-
-Both run automatically, one after the other.
-
-### Project Structure
-
-```
-borg_backup_gui.py           # Main app (~2900 lines)
-borg-backup-gui.desktop      # Desktop launcher
-start_gui.sh                 # Launch script
-install_desktop_launcher.sh  # Launcher installation
-install_nopasswd_rule.sh     # Sudo NOPASSWD setup
-restore.sh                   # CLI restore for disaster recovery
-assets/
-  borg-backup-gui.svg         # App icon
-plans/
-  plan.md                    # Technical development plan
-```
+Passphrases and S3 keys are stored in plaintext under `~/.config/borg-backup-gui/` with file mode `0600`. See [SECURITY.md](SECURITY.md).
 
 ### License
 
-MIT License – see [LICENSE](LICENSE).
+[GPL-3.0](LICENSE)

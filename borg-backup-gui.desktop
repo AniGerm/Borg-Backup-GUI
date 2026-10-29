@@ -1,12 +1,12 @@
 [Desktop Entry]
-Version=1.0
+Version=2.0
 Type=Application
 Name=Borg Backup GUI
-Comment=Backup und Restore mit Borg (SSH, S3, lokale Laufwerke)
-Exec=/home/max/Dokumente/Programme/Hetzner_Backup_and_Restore/start_gui.sh
-Icon=/home/max/.local/share/icons/hicolor/scalable/apps/borg-backup-gui.svg
+Comment=System backups with Borg — verified, multi-target, auditable
+Exec=borg-backup-gui
+Icon=borg-backup-gui
 Terminal=false
-Categories=Utility;
-Keywords=backup;borg;restore;
+Categories=Utility;Archiving;
+Keywords=backup;borg;restore;hetzner;
 StartupNotify=true
 StartupWMClass=BorgBackupGUI

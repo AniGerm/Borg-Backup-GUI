@@ -51,6 +51,14 @@ Im Extensions-Tab (Strg+Shift+X) installieren:
 - Diese Extensions ersetzen NICHT den pre-commit Hook, sondern zeigen Fehler schon
   beim Schreiben an – der Hook bleibt trotzdem die verbindliche Prüfung vor jedem Commit.
 
+## QA-Gate vor Merge
+
+```bash
+./QA.sh
+```
+
+Erforderlich: Score ≥ 95 (ruff check/format, mypy, Syntax). Optional: Security-Subset.
+
 ## Dateien-Übersicht – wohin damit
 | Datei                      | Ort                                  |
 |-----------------------------|---------------------------------------|
@@ -58,5 +66,8 @@ Im Extensions-Tab (Strg+Shift+X) installieren:
 | MISTAKES.md                 | Projekt-Root                          |
 | .pre-commit-config.yaml     | Projekt-Root                          |
 | mypy.ini                    | Projekt-Root                          |
+| QA.sh                       | Projekt-Root                          |
+| ruff.toml                   | Projekt-Root                          |
+| requirements-dev.txt        | Projekt-Root                          |
 | package.json (von npm init) | Projekt-Root                          |
 | venv/                       | Projekt-Root (in .gitignore!)         |

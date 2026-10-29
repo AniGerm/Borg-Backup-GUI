@@ -5,6 +5,7 @@
 - Clearer auto-update status when GitHub latest has no `.deb` asset
 - Deb packaging: system autostart (`/etc/xdg/autostart`) + `migrate-to-deb.sh`
 - Release pipeline test: GitHub Release with `.deb` for updater verification
+- Repo cleanup: remove legacy archive, old plans, unused assets
 
 ## 2.0.0
 
@@ -14,8 +15,6 @@
 - GPL-3.0 LICENSE, SECURITY.md, CONTRIBUTING.md, GitHub issue templates
 - First-run setup wizard (destination, passphrase, sources, privilege hint)
 - Debian package via `packaging/build_deb.sh` and GitHub Actions release workflow
-- Legacy/broken entry points moved to `archive/`
-
 ### Reliability & security
 - Multi-destination create results aggregated (partial failures reported honestly)
 - Optional maintenance (prune/check/compact) on all destinations

@@ -87,9 +87,6 @@ INSTANCE_LOCK_FILE = CONFIG_DIR / "instance.lock"
 INSTANCE_SOCKET_FILE = CONFIG_DIR / "instance.sock"
 PROTOCOL_DIR = CONFIG_DIR / "protokolle"
 ASSET_ICON_FILE = Path(__file__).resolve().parent / "assets" / "borg-backup-gui.svg"
-# Fallback auf altes Icon
-if not ASSET_ICON_FILE.exists():
-    ASSET_ICON_FILE = Path(__file__).resolve().parent / "assets" / "hetzner-borg-gui.svg"
 DEFAULT_STORAGE = "uXXXXXX@uXXXXXX.your-storagebox.de:./backup"
 BORG_BIN = shutil.which("borg") or "borg"
 INSTANCE_LOCK_HANDLE = None

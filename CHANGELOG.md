@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.0.0-rc3
+
+- Fix: GUI startete nicht (fehlende Methode „Repository initialisieren“)
+
 ## 3.0.0-rc2
 
 - Update-Check: Ergebnis 6 h cachen, Auto-Check erst nach 2 min; bei HTTP 403 Rate-Limit-Backoff

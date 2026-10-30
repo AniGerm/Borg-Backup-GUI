@@ -6,7 +6,7 @@ Die GUI läuft als normaler Benutzer. Backups, Wiederherstellungen und Zeitplän
 führt der root-Systemdienst aus; die GUI steuert ihn über einen Unix-Socket (polkit).
 """
 
-__version__ = "3.0.0-rc2"
+__version__ = "3.0.0-rc3"
 
 import datetime
 import fcntl
@@ -4914,6 +4914,45 @@ class BorgBackupGUI:
         job["destination_ids"] = ids
         self._save_config()
         self._refresh_destinations_tree()
+
+    def _init_selected_destination(self) -> None:
+        """Ask the backup service to run ``borg init`` for the selected destination."""
+        if not hasattr(self, "dest_tree"):
+            return
+        if not self.daemon_online:
+            self._show_notice("Backup-Dienst nicht verbunden.", level="warning")
+            return
+        sel = self.dest_tree.selection()
+        if not sel:
+            messagebox.showinfo("Repository", "Bitte zuerst ein Backup-Ziel auswählen.")
+            return
+        dest_id = str(sel[0])
+        dest = get_destination(self.config_data, dest_id)
+        if not dest:
+            messagebox.showerror("Repository", "Ausgewähltes Ziel wurde nicht gefunden.")
+            return
+        repo = str(dest.get("storage") or dest.get("local_path") or "").strip()
+        label = str(dest.get("name") or repo or dest_id)
+        if not messagebox.askyesno(
+            "Repository initialisieren",
+            f"Soll das Repository für „{label}“ jetzt initialisiert werden?\n\n"
+            f"{repo or '(kein Pfad)'}\n\n"
+            "Dafür ist ggf. das Administrator-Passwort nötig (polkit).",
+        ):
+            return
+        self._show_notice(f"Initialisiere Repository „{label}“ …", level="info")
+
+        def done(result, error):
+            if error is not None:
+                messagebox.showerror("Repository", error.message)
+                return
+            self._show_notice(
+                f"Initialisierung von „{label}“ gestartet.",
+                level="info",
+                timeout_ms=8000,
+            )
+
+        self._daemon_call_async("init_repo", {"dest_id": dest_id}, on_done=done, slow=True)
 
     def _show_add_destination_dialog(self) -> None:
         dialog = tk.Toplevel(self.master)

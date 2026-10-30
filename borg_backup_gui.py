@@ -6,7 +6,7 @@ Die GUI läuft als normaler Benutzer. Backups, Wiederherstellungen und Zeitplän
 führt der root-Systemdienst aus; die GUI steuert ihn über einen Unix-Socket (polkit).
 """
 
-__version__ = "3.0.0-rc4"
+__version__ = "3.0.0-rc5"
 
 import datetime
 import fcntl
@@ -85,16 +85,18 @@ try:
 except Exception:
     FPDF = None  # type: ignore[assignment,misc]
 
+TRAY_IMPORT_ERROR = ""
 try:
     import gi
 
-    gi.require_version("AyatanaAppIndicator3", "0.1")
     gi.require_version("Gtk", "3.0")
+    gi.require_version("AyatanaAppIndicator3", "0.1")
     from gi.repository import AyatanaAppIndicator3, GLib, Gtk
-except Exception:
+except Exception as _tray_exc:  # noqa: BLE001 — optional desktop feature
     AyatanaAppIndicator3 = None
     Gtk = None
     GLib = None
+    TRAY_IMPORT_ERROR = str(_tray_exc)
 
 # ============================================================
 # KONFIGURATION
@@ -1519,9 +1521,10 @@ class BorgBackupGUI:
             tray_check.state(["disabled"])
             tray_style_combo.state(["disabled"])
             tray_apply_btn.state(["disabled"])
+            detail = TRAY_IMPORT_ERROR or "AppIndicator/Pillow-Import fehlgeschlagen"
             ttk.Label(
                 tray_frame,
-                text="Tray ist deaktiviert: AppIndicator (gir1.2-ayatanaappindicator3) und Pillow werden benötigt.",
+                text=f"Tray nicht geladen: {detail}",
                 font=("Arial", 9),
             ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
         elif self.is_root:
@@ -3368,14 +3371,23 @@ class BorgBackupGUI:
         except OSError as exc:
             self._show_notice(f"Autostart-Override fehlgeschlagen: {exc}", level="warning")
 
+    def _tray_missing_deps_message(self) -> str:
+        if TRAY_IMPORT_ERROR:
+            return (
+                "Tray-Bibliotheken konnten nicht geladen werden "
+                f"({TRAY_IMPORT_ERROR}). Pakete: python3-gi, gir1.2-ayatanaappindicator3-0.1, python3-pil."
+            )
+        if Image is None or ImageDraw is None:
+            return "Pillow fehlt (Paket python3-pil)."
+        return ""
+
     def _on_tray_settings_change(self):
         if not self.tray_supported:
-            self._show_notice(
-                "Tray nicht verfügbar. Bitte AppIndicator und Pillow (python3-pil) installieren.", level="warning"
-            )
+            self._show_notice(self._tray_missing_deps_message() or "Tray nicht verfügbar.", level="warning")
             return
         self._save_config()
         self._sync_autostart_override()
+        self.native_indicator_failed = False
         self._setup_tray_icon(force_restart=True)
         self._update_dashboard_status()
         self._show_notice("Tray-Einstellungen übernommen.", level="success")
@@ -3388,56 +3400,53 @@ class BorgBackupGUI:
         if force_restart:
             self._stop_tray_icon()
 
-        if tray_enabled and self.tray_icon is None:
+        has_tray = self.tray_icon is not None or self.native_indicator is not None
+        if tray_enabled and not has_tray:
             self._start_tray_icon()
-        if not tray_enabled and self.tray_icon is not None:
+        if not tray_enabled and has_tray:
             self._stop_tray_icon()
 
     def _start_tray_icon(self):
-        if not self.tray_runtime_available or self.tray_icon is not None:
+        if not self.tray_runtime_available:
+            return
+        if self.tray_icon is not None or self.native_indicator is not None:
             return
 
         self.tray_ready = False
         self.tray_icon_signature = None
 
         if self.native_indicator_supported and not self.native_indicator_failed and self._start_native_indicator():
-            self.master.after(2000, self._ensure_tray_ready_or_fallback)
+            self.master.after(5000, self._ensure_tray_ready_or_fallback)
             self._schedule_tray_live_refresh(1000)
             return
 
         self.tray_ready = False
-        self._show_notice(
-            "Tray nicht verfügbar (AppIndicator fehlt). Bitte gir1.2-ayatanaappindicator3 installieren.",
-            level="warning",
-            timeout_ms=10000,
-        )
+        missing = self._tray_missing_deps_message()
+        if missing:
+            self._show_notice(missing, level="warning", timeout_ms=12000)
+        else:
+            self._show_notice(
+                "Tray-Start fehlgeschlagen (AppIndicator-Laufzeit). "
+                "Die Pakete sind installiert — bitte GUI neu starten. "
+                "Unter GNOME: Erweiterung „Ubuntu AppIndicators“ aktivieren.",
+                level="warning",
+                timeout_ms=12000,
+            )
 
     def _ensure_tray_ready_or_fallback(self):
         if self.tray_ready or not self.tray_runtime_available:
             return
-
+        # Keep a live indicator; only warn. Do not tear it down — Gtk.main_level()
+        # from the Tk thread is always 0 and previously caused false "reinstall" prompts.
         if self.native_indicator is not None:
-            indicator = self.native_indicator
-            self.native_indicator = None
-            self.native_indicator_failed = True
-            try:
-                if GLib is not None:
-
-                    def _deactivate():
-                        try:
-                            indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.PASSIVE)
-                        except Exception:
-                            pass
-                        return False
-
-                    GLib.idle_add(_deactivate)
-                else:
-                    indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.PASSIVE)
-            except Exception:
-                pass
-
-        if self.tray_icon is None:
-            self._start_tray_icon()
+            self._show_notice(
+                "Tray antwortet verzögert — Symbol ggf. in der Statusleiste prüfen.",
+                level="info",
+                timeout_ms=8000,
+            )
+            return
+        self.native_indicator_failed = False
+        self._start_tray_icon()
 
     def _tray_status_lines(self):
         last_success = self.status_data.get("last_success_at", "")
@@ -3635,16 +3644,26 @@ class BorgBackupGUI:
                         icon_path = self._tray_icon_file_path()
                         startup_image.save(icon_path, "PNG")
                         self._tray_icon_path = icon_path
-                        indicator.set_icon(icon_path)
+                        path_str = str(icon_path)
+                        if hasattr(indicator, "set_icon_full"):
+                            indicator.set_icon_full(path_str, title or "Borg Backup GUI")
+                        else:
+                            indicator.set_icon(path_str)
                         indicator.set_menu(menu)
                         indicator.set_title(title)
                         indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
                         self.tray_ready = True
-                    except Exception:
+                    except Exception as exc:
                         self.tray_ready = False
                         self.native_indicator = None
                         self.native_indicator_failed = True
-                        self.master.after(0, self._start_tray_icon)
+                        err_text = str(exc)
+                        self.master.after(
+                            0,
+                            lambda msg=err_text: self._show_notice(
+                                f"Tray-Aktivierung fehlgeschlagen: {msg}", level="warning", timeout_ms=12000
+                            ),
+                        )
                     self._update_tray_status_icon(initial_color)
                     return False
 
@@ -3932,7 +3951,10 @@ class BorgBackupGUI:
 
             def _do_update():
                 try:
-                    indicator.set_icon(icon_path)
+                    if hasattr(indicator, "set_icon_full"):
+                        indicator.set_icon_full(icon_path, description or "Borg Backup GUI")
+                    else:
+                        indicator.set_icon(icon_path)
                 except Exception:
                     pass
                 return False  # run once only
@@ -3967,40 +3989,11 @@ class BorgBackupGUI:
             self.tray_ready = False
             return
 
-        # Prüfe pystray Tray
-        if self.tray_icon is not None:
-            try:
-                if hasattr(self.tray_icon, "update_menu"):
-                    self.tray_icon.update_menu()
-                else:
-                    _ = self.tray_icon.icon
-            except Exception:
-                try:
-                    self.tray_icon.stop()
-                except Exception:
-                    pass
-                self.tray_icon = None
-                self.tray_ready = False
-                self._show_notice("Tray-Symbol wurde neu gestartet.", level="info", timeout_ms=5000)
-                self._start_tray_icon()
-                self._restore_window_if_hidden()
+        if self.tray_icon is not None or self.native_indicator is not None:
             return
 
-        # Prüfe nativen Indicator
-        if self.native_indicator is not None:
-            try:
-                if Gtk is not None and Gtk.main_level() == 0:
-                    raise RuntimeError("Gtk main loop not running")
-            except Exception:
-                self.native_indicator = None
-                self.native_indicator_failed = True
-                self.tray_ready = False
-                self._show_notice("Tray-Symbol wurde neu gestartet.", level="info", timeout_ms=5000)
-                self._start_tray_icon()
-                self._restore_window_if_hidden()
-            return
-
-        # Kein Tray-Icon, aber Tray sollte aktiv sein → neu starten
+        # Kein Tray-Icon, aber Tray sollte aktiv sein → neu starten (ohne false Gtk.main_level-Check).
+        self.native_indicator_failed = False
         self.tray_ready = False
         self._start_tray_icon()
         self._restore_window_if_hidden()

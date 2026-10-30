@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.0.0-rc5
+
+- Fix: falsche Tray-Meldung „bitte installieren“ (Gtk.main_level-Check im falschen Thread)
+
 ## 3.0.0-rc4
 
 - Backup-Ziele: USB (UUID), SMB/CIFS und NFS mit Auto-Mount durch den Systemdienst

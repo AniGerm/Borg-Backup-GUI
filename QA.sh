@@ -16,7 +16,7 @@ if [[ ! -x "$PY" ]]; then
 fi
 
 TARGETS=(borg_backup_gui.py borg_model.py borg_updates.py)
-for extra in borg_engine.py borg_daemon.py borg_ipc.py borg_sysconfig.py; do
+for extra in borg_engine.py borg_daemon.py borg_ipc.py borg_sysconfig.py borg_mounts.py; do
   if [[ -f "$extra" ]]; then
     TARGETS+=("$extra")
   fi

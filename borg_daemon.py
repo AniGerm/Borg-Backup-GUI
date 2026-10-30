@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import borg_engine as engine
+import borg_mounts as mounts
 from borg_ipc import IpcError, IpcServer, Peer, PolkitAuthorizer
 from borg_model import compute_next_run, format_schedule_summary
 from borg_sysconfig import (
@@ -39,6 +40,7 @@ from borg_sysconfig import (
     load_system_config,
     mask_secrets,
     merge_legacy_status,
+    prune_unused_creds,
     prune_unused_keys,
     restore_masked_secrets,
     safe_name,
@@ -359,6 +361,10 @@ class Daemon:
             finally:
                 with self.lock:
                     self.current = None
+                try:
+                    self._release_idle_mounts()
+                except Exception:
+                    LOG.exception("Unmount nach Auftrag fehlgeschlagen")
                 self.emit_status()
 
     def execute(self, item: WorkItem) -> None:
@@ -405,12 +411,14 @@ class Daemon:
             entry["last_error"] = ""
         self.save_status()
         try:
+            self._ensure_accounts_mounted(self._accounts_for_job_or_dest(job=name))
             plan = engine.plan_backup(
                 cfg, name, self.paths, entry, now=started, hostname=self.hostname, path_exists=self.path_exists
             )
-        except engine.EngineError as exc:
-            self.log("backup", f"[FEHLER] {exc}", job=name)
-            self._finish_backup(item, started, -1, str(exc), [], None)
+        except (engine.EngineError, IpcError) as exc:
+            message = exc.message if isinstance(exc, IpcError) else str(exc)
+            self.log("backup", f"[FEHLER] {message}", job=name)
+            self._finish_backup(item, started, -1, message, [], None)
             return
 
         item.label = f"Backup {name}"
@@ -539,8 +547,74 @@ class Daemon:
         self.log("backup", f"<<< Backup „{item.job}“ beendet [{level}] {error}".rstrip(), job=item.job)
         self.broadcast("job_finished", {"id": item.id, "kind": "backup", "job": item.job, "status": last})
 
+    # ---------------------------------------------------------------- mounts
+    def _accounts_for_job_or_dest(self, job: str = "", dest_id: str = "") -> list[dict[str, Any]]:
+        with self.lock:
+            cfg = copy.deepcopy(self.cfg)
+        accounts: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        dest_ids: list[str] = []
+        if dest_id:
+            dest_ids = [dest_id]
+        elif job:
+            found = engine.find_job(cfg, job) or {}
+            dest_ids = [str(d) for d in (found.get("destination_ids") or [])]
+        for did in dest_ids:
+            dest = engine.find_by_id(cfg.get("destinations"), did)
+            if not dest:
+                continue
+            acc = engine.find_by_id(cfg.get("accounts"), str(dest.get("account_id") or ""))
+            if not acc:
+                continue
+            acc_id = str(acc.get("id") or "")
+            if acc_id and acc_id not in seen:
+                seen.add(acc_id)
+                accounts.append(acc)
+        return accounts
+
+    def _ensure_accounts_mounted(self, accounts: list[dict[str, Any]]) -> None:
+        for account in accounts:
+            if not mounts.needs_mount(account):
+                continue
+            label = account.get("name") or account.get("id") or "?"
+            try:
+                mounts.ensure_mount(account, self.paths)
+            except mounts.MountError as exc:
+                raise IpcError("failed", str(exc)) from exc
+            self.log("system", f"Datenträger/Freigabe für „{label}“ bereit.")
+
+    def _busy_mount_account_ids(self) -> set[str]:
+        """Account ids still needed by the current item or queued work."""
+        needed: set[str] = set()
+        with self.lock:
+            items = list(self.queue)
+            if self.current:
+                items = [self.current, *items]
+        for item in items:
+            dest_id = str(item.params.get("dest_id") or "")
+            for acc in self._accounts_for_job_or_dest(job=item.job, dest_id=dest_id):
+                acc_id = str(acc.get("id") or "")
+                if acc_id:
+                    needed.add(acc_id)
+        return needed
+
+    def _release_idle_mounts(self) -> None:
+        busy = self._busy_mount_account_ids()
+        with self.lock:
+            accounts = list(self.cfg.get("accounts") or [])
+        for account in accounts:
+            if not mounts.needs_mount(account):
+                continue
+            if str(account.get("id") or "") in busy:
+                continue
+            mounts.release_mount(account, self.paths)
+
+    def list_volumes(self) -> dict[str, Any]:
+        return {"volumes": mounts.list_removable_volumes()}
+
     # ---------------------------------------------------------------- restore
     def _target_for(self, job: str, dest_id: str = "") -> engine.Target:
+        self._ensure_accounts_mounted(self._accounts_for_job_or_dest(job=job, dest_id=dest_id))
         with self.lock:
             cfg = copy.deepcopy(self.cfg)
         try:
@@ -705,6 +779,7 @@ class Daemon:
             raise IpcError("invalid", "\n".join(key_errors))
         save_system_config(self.paths, merged)
         prune_unused_keys(merged, self.paths)
+        prune_unused_creds(merged, self.paths)
         with self.lock:
             self.cfg = merged
             self.recompute_schedule()
@@ -733,6 +808,8 @@ class Daemon:
             return self.get_config()
         if method == "get_logs":
             return self.get_logs(int(params.get("since") or 0), str(params.get("channel") or ""))
+        if method == "list_volumes":
+            return self.list_volumes()
         if method == "list_archives":
             return self.list_archives(str(params.get("job") or ""), str(params.get("dest_id") or ""))
         if method == "archive_info":

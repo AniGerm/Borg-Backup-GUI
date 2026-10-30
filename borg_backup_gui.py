@@ -6,7 +6,7 @@ Die GUI läuft als normaler Benutzer. Backups, Wiederherstellungen und Zeitplän
 führt der root-Systemdienst aus; die GUI steuert ihn über einen Unix-Socket (polkit).
 """
 
-__version__ = "3.0.0-rc3"
+__version__ = "3.0.0-rc4"
 
 import datetime
 import fcntl
@@ -1735,7 +1735,11 @@ class BorgBackupGUI:
         ttk.Label(frame, text="Backend-Typ:").grid(row=row, column=0, sticky="e", padx=5, pady=5)
         type_var = tk.StringVar(value="ssh")
         type_combo = ttk.Combobox(
-            frame, textvariable=type_var, values=["ssh", "s3", "local"], state="readonly", width=15
+            frame,
+            textvariable=type_var,
+            values=["ssh", "s3", "local", "usb", "smb", "nfs"],
+            state="readonly",
+            width=15,
         )
         type_combo.grid(row=row, column=1, sticky="w", padx=5, pady=5)
 
@@ -1750,7 +1754,10 @@ class BorgBackupGUI:
             hints = {
                 "ssh": "SSH: user@host:./backup (Hetzner Storage Box, beliebiger Server)",
                 "s3": "S3: Bucket-Name + Access Keys + Endpoint",
-                "local": "Lokal: Pfad zu einem Verzeichnis auf der Festplatte",
+                "local": "Lokal: bereits gemounteter Pfad",
+                "usb": "USB: Datenträger per UUID (Dienst hängt ein)",
+                "smb": "SMB/CIFS-Netzwerkfreigabe",
+                "nfs": "NFS-Export",
             }
             hint_var.set(hints.get(t, ""))
 
@@ -1889,7 +1896,11 @@ class BorgBackupGUI:
         ttk.Label(frame, text="Backend-Typ:").grid(row=row, column=0, sticky="e", padx=5, pady=5)
         type_var = tk.StringVar(value=profile.get("type", "ssh"))
         type_combo = ttk.Combobox(
-            frame, textvariable=type_var, values=["ssh", "s3", "local"], state="readonly", width=15
+            frame,
+            textvariable=type_var,
+            values=["ssh", "s3", "local", "usb", "smb", "nfs"],
+            state="readonly",
+            width=15,
         )
         type_combo.grid(row=row, column=1, sticky="w", padx=5, pady=5)
 
@@ -1981,7 +1992,10 @@ class BorgBackupGUI:
             hints = {
                 "ssh": "SSH / Storage Box mit Port 23",
                 "s3": "S3 Object Storage (z.B. Hetzner)",
-                "local": "Lokales Laufwerk / USB-Festplatte",
+                "local": "Bereits gemounteter lokaler Pfad",
+                "usb": "USB-Datenträger (wird vom Dienst eingehängt)",
+                "smb": "SMB/CIFS-Netzwerkfreigabe",
+                "nfs": "NFS-Netzwerklaufwerk",
             }
             self.backend_hint_var.set(f"Aktiver Typ: {hints.get(profile_type, profile_type)}")
         if profile_type == "ssh" and hasattr(self, "ssh_fields_frame"):
@@ -4753,32 +4767,52 @@ class BorgBackupGUI:
     def _show_account_dialog(self, edit: dict | None = None, on_saved=None):
         dialog = tk.Toplevel(self.master)
         dialog.title("Account bearbeiten" if edit else "Neuer Account")
-        dialog.geometry("520x420")
+        dialog.geometry("560x560")
         dialog.transient(self.master)
         dialog.configure(bg=self.ui["bg"])
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=1)
 
-        name_var = tk.StringVar(value=(edit or {}).get("name", ""))
-        type_var = tk.StringVar(value=(edit or {}).get("type", "ssh"))
-        ssh_var = tk.StringVar(value=(edit or {}).get("ssh_key", ""))
-        pass_var = tk.StringVar(value=(edit or {}).get("passphrase", ""))
-        s3_access = tk.StringVar(value=(edit or {}).get("s3_access_key", ""))
-        s3_secret = tk.StringVar(value=(edit or {}).get("s3_secret_key", ""))
-        s3_endpoint = tk.StringVar(value=(edit or {}).get("s3_endpoint_url", "https://fsn1.your-objectstorage.com"))
-        s3_region = tk.StringVar(value=(edit or {}).get("s3_region", "fsn1"))
+        base = edit or {}
+        name_var = tk.StringVar(value=base.get("name", ""))
+        type_var = tk.StringVar(value=base.get("type", "ssh"))
+        ssh_var = tk.StringVar(value=base.get("ssh_key", ""))
+        pass_var = tk.StringVar(value=base.get("passphrase", ""))
+        s3_access = tk.StringVar(value=base.get("s3_access_key", ""))
+        s3_secret = tk.StringVar(value=base.get("s3_secret_key", ""))
+        s3_endpoint = tk.StringVar(value=base.get("s3_endpoint_url", "https://fsn1.your-objectstorage.com"))
+        s3_region = tk.StringVar(value=base.get("s3_region", "fsn1"))
+        usb_uuid = tk.StringVar(value=base.get("volume_uuid", ""))
+        usb_label = tk.StringVar(value=base.get("volume_label", ""))
+        usb_pick = tk.StringVar(value="")
+        smb_server = tk.StringVar(value=base.get("smb_server", ""))
+        smb_share = tk.StringVar(value=base.get("smb_share", ""))
+        smb_user = tk.StringVar(value=base.get("smb_username", ""))
+        smb_domain = tk.StringVar(value=base.get("smb_domain", ""))
+        smb_password = tk.StringVar(value=base.get("smb_password", ""))
+        nfs_server = tk.StringVar(value=base.get("nfs_server", ""))
+        nfs_export = tk.StringVar(value=base.get("nfs_export", ""))
+        mount_opts = tk.StringVar(value=base.get("mount_options", ""))
 
         ttk.Label(frame, text="Name").grid(row=0, column=0, sticky="e", padx=5, pady=4)
         ttk.Entry(frame, textvariable=name_var).grid(row=0, column=1, sticky="ew", padx=5, pady=4)
         ttk.Label(frame, text="Typ").grid(row=1, column=0, sticky="e", padx=5, pady=4)
-        type_box = ttk.Combobox(frame, textvariable=type_var, values=["ssh", "s3", "local"], state="readonly")
+        type_box = ttk.Combobox(
+            frame,
+            textvariable=type_var,
+            values=["ssh", "s3", "local", "usb", "smb", "nfs"],
+            state="readonly",
+        )
         type_box.grid(row=1, column=1, sticky="w", padx=5, pady=4)
 
         ssh_frame = ttk.Frame(frame)
         s3_frame = ttk.Frame(frame)
         local_frame = ttk.Frame(frame)
-        for sub in (ssh_frame, s3_frame, local_frame):
+        usb_frame = ttk.Frame(frame)
+        smb_frame = ttk.Frame(frame)
+        nfs_frame = ttk.Frame(frame)
+        for sub in (ssh_frame, s3_frame, local_frame, usb_frame, smb_frame, nfs_frame):
             sub.columnconfigure(1, weight=1)
 
         ttk.Label(ssh_frame, text="SSH Key").grid(row=0, column=0, sticky="e", padx=5, pady=4)
@@ -4799,20 +4833,85 @@ class BorgBackupGUI:
 
         ttk.Label(local_frame, text="Passphrase").grid(row=0, column=0, sticky="e", padx=5, pady=4)
         ttk.Entry(local_frame, textvariable=pass_var, show="*").grid(row=0, column=1, sticky="ew", padx=5, pady=4)
-        ttk.Label(local_frame, text="Lokale Accounts brauchen nur die Repo-Passphrase.", style="Muted.TLabel").grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=5, pady=4
+        ttk.Label(
+            local_frame,
+            text="Für bereits gemountete Pfade (z. B. /mnt/…). USB/Netz besser als Typ usb/smb/nfs.",
+            style="Muted.TLabel",
+            wraplength=420,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=4)
+
+        ttk.Label(usb_frame, text="Datenträger").grid(row=0, column=0, sticky="e", padx=5, pady=4)
+        usb_combo = ttk.Combobox(usb_frame, textvariable=usb_pick, state="readonly", width=42)
+        usb_combo.grid(row=0, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Button(
+            usb_frame,
+            text="Aktualisieren",
+            command=lambda: self._fill_usb_volume_combo(usb_combo, usb_pick, usb_uuid, usb_label),
+        ).grid(row=0, column=2, padx=4)
+        ttk.Label(usb_frame, text="UUID").grid(row=1, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(usb_frame, textvariable=usb_uuid).grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=4)
+        ttk.Label(usb_frame, text="Label").grid(row=2, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(usb_frame, textvariable=usb_label).grid(row=2, column=1, columnspan=2, sticky="ew", padx=5, pady=4)
+        ttk.Label(usb_frame, text="Passphrase").grid(row=3, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(usb_frame, textvariable=pass_var, show="*").grid(
+            row=3, column=1, columnspan=2, sticky="ew", padx=5, pady=4
         )
+        ttk.Label(usb_frame, text="Mount-Optionen").grid(row=4, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(usb_frame, textvariable=mount_opts).grid(row=4, column=1, columnspan=2, sticky="ew", padx=5, pady=4)
+
+        ttk.Label(smb_frame, text="Server").grid(row=0, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(smb_frame, textvariable=smb_server).grid(row=0, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(smb_frame, text="Freigabe").grid(row=1, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(smb_frame, textvariable=smb_share).grid(row=1, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(smb_frame, text="Benutzer").grid(row=2, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(smb_frame, textvariable=smb_user).grid(row=2, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(smb_frame, text="Domain").grid(row=3, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(smb_frame, textvariable=smb_domain).grid(row=3, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(smb_frame, text="Passwort").grid(row=4, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(smb_frame, textvariable=smb_password, show="*").grid(row=4, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(smb_frame, text="Passphrase").grid(row=5, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(smb_frame, textvariable=pass_var, show="*").grid(row=5, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(smb_frame, text="Mount-Optionen").grid(row=6, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(smb_frame, textvariable=mount_opts).grid(row=6, column=1, sticky="ew", padx=5, pady=4)
+
+        ttk.Label(nfs_frame, text="Server").grid(row=0, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(nfs_frame, textvariable=nfs_server).grid(row=0, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(nfs_frame, text="Export").grid(row=1, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(nfs_frame, textvariable=nfs_export).grid(row=1, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(nfs_frame, text="Passphrase").grid(row=2, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(nfs_frame, textvariable=pass_var, show="*").grid(row=2, column=1, sticky="ew", padx=5, pady=4)
+        ttk.Label(nfs_frame, text="Mount-Optionen").grid(row=3, column=0, sticky="e", padx=5, pady=4)
+        ttk.Entry(nfs_frame, textvariable=mount_opts).grid(row=3, column=1, sticky="ew", padx=5, pady=4)
 
         fields_host = ttk.Frame(frame)
         fields_host.grid(row=2, column=0, columnspan=2, sticky="ew", pady=8)
         fields_host.columnconfigure(0, weight=1)
+        frames = {
+            "ssh": ssh_frame,
+            "s3": s3_frame,
+            "local": local_frame,
+            "usb": usb_frame,
+            "smb": smb_frame,
+            "nfs": nfs_frame,
+        }
+
+        def _on_usb_pick(*_args):
+            value = usb_pick.get()
+            meta = getattr(usb_combo, "_volume_map", {}).get(value) or {}
+            if meta.get("uuid"):
+                usb_uuid.set(meta["uuid"])
+            if meta.get("label"):
+                usb_label.set(meta["label"])
+
+        usb_combo.bind("<<ComboboxSelected>>", _on_usb_pick)
 
         def _show_type_fields(*_args):
             for child in fields_host.winfo_children():
                 child.grid_forget()
-            current = type_var.get()
-            target = ssh_frame if current == "ssh" else s3_frame if current == "s3" else local_frame
+            target = frames.get(type_var.get(), local_frame)
             target.grid(row=0, column=0, sticky="ew")
+            if type_var.get() == "usb":
+                self._fill_usb_volume_combo(usb_combo, usb_pick, usb_uuid, usb_label)
 
         type_box.bind("<<ComboboxSelected>>", _show_type_fields)
         _show_type_fields()
@@ -4823,7 +4922,7 @@ class BorgBackupGUI:
                 messagebox.showerror("Fehler", "Name fehlt.", parent=dialog)
                 return
             payload = {
-                "id": (edit or {}).get("id") or new_id("acc"),
+                "id": base.get("id") or new_id("acc"),
                 "name": name,
                 "type": type_var.get().strip() or "ssh",
                 "ssh_key": ssh_var.get().strip(),
@@ -4832,6 +4931,16 @@ class BorgBackupGUI:
                 "s3_secret_key": s3_secret.get(),
                 "s3_endpoint_url": s3_endpoint.get().strip(),
                 "s3_region": s3_region.get().strip(),
+                "volume_uuid": usb_uuid.get().strip(),
+                "volume_label": usb_label.get().strip(),
+                "smb_server": smb_server.get().strip(),
+                "smb_share": smb_share.get().strip(),
+                "smb_username": smb_user.get().strip(),
+                "smb_domain": smb_domain.get().strip(),
+                "smb_password": smb_password.get(),
+                "nfs_server": nfs_server.get().strip(),
+                "nfs_export": nfs_export.get().strip(),
+                "mount_options": mount_opts.get().strip(),
             }
             accounts = list(self.config_data.get("accounts", []))
             if edit:
@@ -4849,6 +4958,52 @@ class BorgBackupGUI:
             row=3, column=1, sticky="e", padx=5, pady=10
         )
         ttk.Button(frame, text="Abbrechen", command=dialog.destroy).grid(row=3, column=0, sticky="w", padx=5, pady=10)
+
+    def _fill_usb_volume_combo(self, combo, pick_var, uuid_var, label_var) -> None:
+        """Populate USB picker from daemon list_volumes, with local lsblk fallback."""
+        volumes: list[dict] = []
+
+        def apply(vols: list[dict]) -> None:
+            labels = []
+            mapping = {}
+            for vol in vols:
+                uuid = str(vol.get("uuid") or "")
+                label = str(vol.get("label") or uuid[:8])
+                size = str(vol.get("size") or "")
+                text = f"{label} ({size})" if size else label
+                if uuid:
+                    text = f"{text} — {uuid[:8]}…"
+                labels.append(text)
+                mapping[text] = vol
+            combo["values"] = labels
+            setattr(combo, "_volume_map", mapping)
+            current_uuid = uuid_var.get().strip()
+            for text, vol in mapping.items():
+                if vol.get("uuid") == current_uuid:
+                    pick_var.set(text)
+                    return
+            if labels and not pick_var.get():
+                pick_var.set(labels[0])
+                vol = mapping[labels[0]]
+                uuid_var.set(str(vol.get("uuid") or ""))
+                label_var.set(str(vol.get("label") or ""))
+
+        def done(result, error):
+            if error is None and isinstance(result, dict):
+                volumes.extend(result.get("volumes") or [])
+            if not volumes:
+                try:
+                    import borg_mounts
+
+                    volumes.extend(borg_mounts.list_removable_volumes())
+                except Exception:
+                    pass
+            apply(volumes)
+
+        if self.daemon_online:
+            self._daemon_call_async("list_volumes", on_done=done)
+        else:
+            done({}, None)
 
     def _active_job(self):
         name = self.config_data.get("profile_name", "Standard")
@@ -4981,11 +5136,37 @@ class BorgBackupGUI:
         account_combo.grid(row=2, column=1, sticky="ew", padx=5, pady=6)
 
         name_var = tk.StringVar(value="")
-        storage_var = tk.StringVar(value="")
+        storage_var = tk.StringVar(value="borg-repo")
+        path_hint = tk.StringVar(value="")
         ttk.Label(frame, text="Ziel-Name").grid(row=3, column=0, sticky="e", padx=5, pady=6)
         ttk.Entry(frame, textvariable=name_var).grid(row=3, column=1, sticky="ew", padx=5, pady=6)
-        ttk.Label(frame, text="Repo / Pfad").grid(row=4, column=0, sticky="e", padx=5, pady=6)
+        path_label = ttk.Label(frame, text="Repo / Pfad")
+        path_label.grid(row=4, column=0, sticky="e", padx=5, pady=6)
         ttk.Entry(frame, textvariable=storage_var).grid(row=4, column=1, sticky="ew", padx=5, pady=6)
+        ttk.Label(frame, textvariable=path_hint, style="Muted.TLabel", wraplength=420).grid(
+            row=5, column=0, columnspan=2, sticky="w", padx=5, pady=2
+        )
+
+        def _update_path_hint(*_args):
+            account = account_map.get(account_var.get()) or {}
+            ptype = str(account.get("type") or "")
+            if ptype in {"usb", "smb", "nfs"}:
+                path_label.config(text="Unterordner")
+                path_hint.set(
+                    "Wird unter /var/lib/borg-backup-gui/mounts/<account>/ eingehängt. "
+                    "Unterordner relativ angeben (z. B. borg-repo)."
+                )
+                if not storage_var.get().strip() or storage_var.get().startswith("/"):
+                    storage_var.set("borg-repo")
+            elif ptype == "local":
+                path_label.config(text="Absoluter Pfad")
+                path_hint.set("Bereits gemounteter lokaler Pfad (z. B. /mnt/backup/borg).")
+            else:
+                path_label.config(text="Repo / Pfad")
+                path_hint.set("SSH: user@host:./backup — S3: Bucket-Name.")
+
+        account_combo.bind("<<ComboboxSelected>>", _update_path_hint)
+        _update_path_hint()
 
         def _create_with_account(account: dict):
             dest_name = name_var.get().strip() or f"{account.get('name')} Ziel"
@@ -4993,13 +5174,24 @@ class BorgBackupGUI:
             if not storage:
                 messagebox.showerror("Fehler", "Repository/Pfad fehlt.", parent=dialog)
                 return
-            dest = {
-                "id": new_id("dest"),
-                "name": dest_name,
-                "account_id": account.get("id"),
-                "storage": storage,
-                "local_path": storage if account.get("type") == "local" else "",
-            }
+            ptype = str(account.get("type") or "")
+            if ptype in {"usb", "smb", "nfs"}:
+                storage = storage.lstrip("/")
+                dest = {
+                    "id": new_id("dest"),
+                    "name": dest_name,
+                    "account_id": account.get("id"),
+                    "storage": storage,
+                    "local_path": storage,
+                }
+            else:
+                dest = {
+                    "id": new_id("dest"),
+                    "name": dest_name,
+                    "account_id": account.get("id"),
+                    "storage": storage,
+                    "local_path": storage if ptype == "local" else "",
+                }
             self.config_data.setdefault("destinations", []).append(dest)
             job = self._active_job()
             if job is not None:
@@ -5022,9 +5214,9 @@ class BorgBackupGUI:
             _create_with_account(account)
 
         ttk.Button(frame, text="Hinzufügen", style="Accent.TButton", command=_continue).grid(
-            row=5, column=1, sticky="e", padx=5, pady=12
+            row=6, column=1, sticky="e", padx=5, pady=12
         )
-        ttk.Button(frame, text="Abbrechen", command=dialog.destroy).grid(row=5, column=0, sticky="w", padx=5, pady=12)
+        ttk.Button(frame, text="Abbrechen", command=dialog.destroy).grid(row=6, column=0, sticky="w", padx=5, pady=12)
 
     def _collect_sources_from_ui(self) -> None:
         """Persist current exclude-list edits into config sources before save/run."""
@@ -5651,7 +5843,11 @@ class BorgBackupGUI:
         dest_type = tk.StringVar(value=self.config_data.get("profile_type", "ssh"))
         ttk.Label(frame, text="Zieltyp").grid(row=2, column=0, sticky="e", padx=5, pady=4)
         type_box = ttk.Combobox(
-            frame, textvariable=dest_type, values=["ssh", "s3", "local"], state="readonly", width=18
+            frame,
+            textvariable=dest_type,
+            values=["ssh", "s3", "local", "usb", "smb", "nfs"],
+            state="readonly",
+            width=18,
         )
         type_box.grid(row=2, column=1, sticky="w", padx=5, pady=4)
 

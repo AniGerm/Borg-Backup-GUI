@@ -329,13 +329,32 @@ def account_summary(account: dict[str, Any]) -> str:
         return account.get("ssh_key", "") or "SSH"
     if ptype == "s3":
         return str(account.get("s3_endpoint_url", "") or "S3")
+    if ptype == "usb":
+        return str(account.get("volume_label") or account.get("volume_uuid") or "USB")
+    if ptype == "smb":
+        server = str(account.get("smb_server") or "").strip()
+        share = str(account.get("smb_share") or "").strip().strip("/")
+        return f"//{server}/{share}" if server and share else "SMB"
+    if ptype == "nfs":
+        server = str(account.get("nfs_server") or "").strip()
+        export = str(account.get("nfs_export") or "").strip()
+        if server and export:
+            return f"{server}:{export if export.startswith('/') else '/' + export}"
+        return "NFS"
     return "local"
 
 
 def resolve_repo(account: dict[str, Any], destination: dict[str, Any]) -> str:
+    """Resolve repository location. For usb/smb/nfs this is only the relative subpath;
+
+    the daemon joins it with the service mount point (see :mod:`borg_mounts`).
+    """
     ptype = account.get("type", "ssh")
     if ptype == "local":
         return str(destination.get("local_path") or destination.get("storage") or "")
+    if ptype in ("usb", "smb", "nfs"):
+        sub = str(destination.get("local_path") or destination.get("storage") or "borg-repo").strip()
+        return sub.lstrip("/") or "borg-repo"
     if ptype == "s3":
         bucket = str(destination.get("storage", "")).strip()
         if bucket.startswith("s3:"):

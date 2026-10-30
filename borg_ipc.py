@@ -38,6 +38,7 @@ METHOD_ACTIONS: dict[str, str] = {
     "get_config": ACTION_STATUS,
     "get_logs": ACTION_STATUS,
     "list_archives": ACTION_STATUS,
+    "list_volumes": ACTION_STATUS,
     "archive_info": ACTION_STATUS,
     "subscribe": ACTION_STATUS,
     "run_job": ACTION_RUN,

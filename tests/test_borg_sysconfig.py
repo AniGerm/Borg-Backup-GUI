@@ -34,7 +34,7 @@ def test_extract_normalizes_and_drops_unknown_keys() -> None:
     assert "unknown" not in job
     assert job["include_folders"] == ["/"]
     assert job["exclude_folders"] == ["/proc", "/sys"]
-    assert cfg["schema_version"] == 3
+    assert cfg["schema_version"] == 4
     assert cfg["accounts"][1]["ssh_port"] == 23
 
 

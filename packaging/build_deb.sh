@@ -27,7 +27,7 @@ mkdir -p \
 
 install -m 0644 \
   borg_backup_gui.py borg_model.py borg_updates.py \
-  borg_engine.py borg_daemon.py borg_ipc.py borg_sysconfig.py \
+  borg_engine.py borg_daemon.py borg_ipc.py borg_sysconfig.py borg_mounts.py \
   "$DEB_ROOT/usr/lib/borg-backup-gui/"
 install -m 0755 start_gui.sh restore.sh "$DEB_ROOT/usr/lib/borg-backup-gui/"
 install -m 0755 packaging/apply-update.sh "$DEB_ROOT/usr/lib/borg-backup-gui/apply-update.sh"
@@ -101,7 +101,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${ARCH}
-Depends: python3 (>= 3.10), python3-tk, python3-gi, gir1.2-ayatanaappindicator3-0.1, python3-pil, python3-fonttools, python3-defusedxml, borgbackup, policykit-1 | polkitd, openssh-client
+Depends: python3 (>= 3.10), python3-tk, python3-gi, gir1.2-ayatanaappindicator3-0.1, python3-pil, python3-fonttools, python3-defusedxml, borgbackup, policykit-1 | polkitd, openssh-client, cifs-utils, nfs-common
 Maintainer: Borg Backup GUI Maintainers <noreply@users.noreply.github.com>
 Installed-Size: ${SIZE}
 Homepage: https://github.com/AniGerm/Borg-Backup-GUI

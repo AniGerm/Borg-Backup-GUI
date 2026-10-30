@@ -17,10 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SECRET_MASK = "••••••••"
-ACCOUNT_SECRET_FIELDS = ("passphrase", "s3_secret_key")
-ACCOUNT_TYPES = ("ssh", "s3", "local")
+ACCOUNT_SECRET_FIELDS = ("passphrase", "s3_secret_key", "smb_password")
+ACCOUNT_TYPES = ("ssh", "s3", "local", "usb", "smb", "nfs")
+MOUNTED_ACCOUNT_TYPES = ("usb", "smb", "nfs")
 SCHEDULE_TYPES = ("manual", "interval", "daily")
 DEFAULT_SSH_PORT = 23
 
@@ -35,6 +36,16 @@ ACCOUNT_FIELDS = (
     "s3_secret_key",
     "s3_endpoint_url",
     "s3_region",
+    "volume_uuid",
+    "volume_label",
+    "smb_server",
+    "smb_share",
+    "smb_username",
+    "smb_domain",
+    "smb_password",
+    "nfs_server",
+    "nfs_export",
+    "mount_options",
 )
 DESTINATION_FIELDS = ("id", "name", "account_id", "storage", "local_path")
 GLOBAL_BOOL_FIELDS = {
@@ -116,13 +127,24 @@ class SystemPaths:
     def mount_dir(self) -> Path:
         return self.run_dir / "mount"
 
+    @property
+    def mounts_dir(self) -> Path:
+        """Service-managed USB/SMB/NFS mount points for backup destinations."""
+        return self.state_dir / "mounts"
+
+    @property
+    def creds_dir(self) -> Path:
+        return self.etc_dir / "creds"
+
     def ensure(self) -> None:
         for path, mode in (
             (self.etc_dir, 0o700),
             (self.keys_dir, 0o700),
+            (self.creds_dir, 0o700),
             (self.state_dir, 0o700),
             (self.logs_dir, 0o700),
             (self.borg_base_dir, 0o700),
+            (self.mounts_dir, 0o700),
             (self.run_dir, 0o755),
             (self.mount_dir, 0o755),
         ):
@@ -249,16 +271,29 @@ def validate_system_config(cfg: dict[str, Any]) -> list[str]:
         elif acc_id in account_ids:
             errors.append(f"Account-ID doppelt: {acc_id}")
         account_ids.add(acc_id)
-        if account.get("type") not in ACCOUNT_TYPES:
+        acc_type = str(account.get("type") or "")
+        if acc_type not in ACCOUNT_TYPES:
             errors.append(f"Account „{label}“: unbekannter Typ {account.get('type')!r}.")
         key = str(account.get("ssh_key") or "")
         if key and not key.startswith("/"):
             errors.append(f"Account „{label}“: SSH-Key muss ein absoluter Pfad sein.")
+        if acc_type == "usb":
+            if not str(account.get("volume_uuid") or "").strip() and not str(account.get("volume_label") or "").strip():
+                errors.append(f"Account „{label}“: USB braucht UUID oder Label.")
+        elif acc_type == "smb":
+            if not str(account.get("smb_server") or "").strip() or not str(account.get("smb_share") or "").strip():
+                errors.append(f"Account „{label}“: SMB braucht Server und Freigabe.")
+            if not str(account.get("smb_username") or "").strip():
+                errors.append(f"Account „{label}“: SMB braucht Benutzername.")
+        elif acc_type == "nfs":
+            if not str(account.get("nfs_server") or "").strip() or not str(account.get("nfs_export") or "").strip():
+                errors.append(f"Account „{label}“: NFS braucht Server und Export-Pfad.")
         for field in ACCOUNT_FIELDS:
             value = account.get(field)
             if isinstance(value, str) and _has_control_chars(value) and field not in ACCOUNT_SECRET_FIELDS:
                 errors.append(f"Account „{label}“: ungültige Zeichen in {field}.")
 
+    accounts_by_id = {str(a.get("id") or ""): a for a in (cfg.get("accounts") or [])}
     dest_ids: set[str] = set()
     for dest in cfg.get("destinations") or []:
         dest_id = str(dest.get("id") or "")
@@ -268,11 +303,17 @@ def validate_system_config(cfg: dict[str, Any]) -> list[str]:
         elif dest_id in dest_ids:
             errors.append(f"Ziel-ID doppelt: {dest_id}")
         dest_ids.add(dest_id)
-        if str(dest.get("account_id") or "") not in account_ids:
+        account_id = str(dest.get("account_id") or "")
+        if account_id not in account_ids:
             errors.append(f"Ziel „{label}“: Account fehlt.")
         repo = str(dest.get("storage") or dest.get("local_path") or "")
         if repo.startswith("-") or _has_control_chars(repo):
             errors.append(f"Ziel „{label}“: ungültiges Repository.")
+        account = accounts_by_id.get(account_id) or {}
+        if account.get("type") == "local" and repo and not repo.startswith("/"):
+            errors.append(f"Ziel „{label}“: lokaler Pfad muss absolut sein.")
+        if account.get("type") in MOUNTED_ACCOUNT_TYPES and (".." in repo or repo.startswith("/")):
+            errors.append(f"Ziel „{label}“: Unterordner darf kein absoluter Pfad und kein '..' sein.")
 
     job_names: set[str] = set()
     for job in cfg.get("jobs") or []:
@@ -403,6 +444,24 @@ def prune_unused_keys(cfg: dict[str, Any], paths: SystemPaths) -> None:
         return
     for entry in entries:
         if entry.is_file() and str(entry) not in used:
+            try:
+                entry.unlink()
+            except OSError:
+                pass
+
+
+def prune_unused_creds(cfg: dict[str, Any], paths: SystemPaths) -> None:
+    used_ids = {
+        safe_name(str(a.get("id") or ""), "acc")
+        for a in (cfg.get("accounts") or [])
+        if str(a.get("type") or "") == "smb"
+    }
+    try:
+        entries = list(paths.creds_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.is_file() and entry.stem not in used_ids:
             try:
                 entry.unlink()
             except OSError:

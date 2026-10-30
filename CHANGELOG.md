@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.0.0-rc4
+
+- Backup-Ziele: USB (UUID), SMB/CIFS und NFS mit Auto-Mount durch den Systemdienst
+- Konten-Dialog mit Datenträger-Auswahl; Credentials root-only unter `/etc/borg-backup-gui`
+
 ## 3.0.0-rc3
 
 - Fix: GUI startete nicht (fehlende Methode „Repository initialisieren“)

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from borg_model import resolve_repo
+from borg_mounts import absolute_repo_path
 from borg_sysconfig import SystemPaths
 
 BORG_BIN = shutil.which("borg") or "/usr/bin/borg"
@@ -200,7 +201,7 @@ def resolve_targets(cfg: dict[str, Any], job: dict[str, Any], paths: SystemPaths
         account = find_by_id(cfg.get("accounts"), str(dest.get("account_id") or ""))
         if not account:
             raise EngineError(f"Ziel „{dest.get('name') or dest_id}“ hat keinen Account.")
-        repo = resolve_repo(account, dest).strip()
+        repo = absolute_repo_path(account, dest, paths).strip()
         if not repo:
             raise EngineError(f"Ziel „{dest.get('name') or dest_id}“ hat kein Repository.")
         if repo.startswith("-"):

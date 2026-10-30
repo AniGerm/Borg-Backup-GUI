@@ -28,7 +28,7 @@
 |--|--------------|-----------------|
 | Full-System (`/`) + root-Dienst | eingeschränkt / nein | ja (`borg-backup-guid`) |
 | Canary Restore-Test | nein | ja |
-| Multi-Ziel + Accounts | Profile | ja |
+| Multi-Ziel (SSH, S3, USB, SMB, NFS) | Profile | ja |
 | PDF-Protokoll + Retention | nein | ja |
 
 ### Architektur (3.x)
@@ -72,7 +72,8 @@ Voraussetzungen: Linux, Python 3.10+, `borgbackup`, `python3-tk`, polkit (für d
 1. App starten → **First-Run-Assistent** (Ziel, Passphrase, Quellen).
 2. Backups laufen im Dienst `borg-backup-guid` — Konfiguration fragt bei Bedarf nach dem Admin-Passwort.
 3. Sicherung → Quellen prüfen → **Backup starten**; Zeitplan ohne angemeldete GUI.
-4. Wiederherstellung-Tab oder [docs/RESTORE.md](docs/RESTORE.md) für Bare-Metal.
+4. Ziele: SSH/S3, USB (UUID), SMB/CIFS oder NFS — Mounts übernimmt der Dienst.
+5. Wiederherstellung-Tab oder [docs/RESTORE.md](docs/RESTORE.md) für Bare-Metal.
 
 ### Updates
 

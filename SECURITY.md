@@ -24,10 +24,12 @@ There is **no** NOPASSWD sudoers rule for `borg`. Legacy files
 
 | Data | Location | Mode |
 |------|----------|------|
-| Accounts, destinations, jobs, passphrases, S3 secrets | `/etc/borg-backup-gui/config.json` | `0600` root |
+| Accounts, destinations, jobs, passphrases, S3/SMB secrets | `/etc/borg-backup-gui/config.json` | `0600` root |
 | SSH private keys (copied on import) | `/etc/borg-backup-gui/keys/` | `0600` root |
+| SMB credentials files | `/etc/borg-backup-gui/creds/` | `0600` root |
 | known_hosts | `/etc/borg-backup-gui/known_hosts` | root |
 | Runtime status / logs / Borg cache | `/var/lib/borg-backup-gui/` | `0700` root |
+| USB/SMB/NFS mount points | `/var/lib/borg-backup-gui/mounts/` | root |
 | UI preferences (tray, window) | `~/.config/borg-backup-gui/` | user `0600` |
 
 Treat `/etc/borg-backup-gui` like a password store. Do not commit or share it.

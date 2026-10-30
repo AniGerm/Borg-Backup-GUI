@@ -26,7 +26,22 @@ GITHUB_REPO = "AniGerm/Borg-Backup-GUI"
 DEB_NAME_RE = re.compile(r"^borg-backup-gui_.*\.deb$", re.IGNORECASE)
 APPLY_UPDATE = Path("/usr/lib/borg-backup-gui/apply-update.sh")
 LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-USER_AGENT = "BorgBackupGUI-Updater"
+USER_AGENT = "BorgBackupGUI-Updater/3 (+https://github.com/AniGerm/Borg-Backup-GUI)"
+# Unauthenticated GitHub API is ~60 req/h/IP — keep network checks rare.
+MIN_CHECK_INTERVAL_SEC = 6 * 3600
+RATE_LIMIT_BACKOFF_SEC = 3600
+_CACHE_STATE_KEYS = (
+    "phase",
+    "available",
+    "latest_version",
+    "deb_name",
+    "deb_url",
+    "deb_size",
+    "sha256_url",
+    "error",
+    "checked_at",
+    "rate_limited_until",
+)
 
 _lock = threading.Lock()
 _state: dict[str, Any] = {
@@ -42,6 +57,7 @@ _state: dict[str, Any] = {
     "sha256_url": None,
     "error": None,
     "checked_at": None,
+    "rate_limited_until": None,
     "repo": GITHUB_REPO,
 }
 
@@ -117,6 +133,58 @@ def release_to_deb_info(release: dict[str, Any]) -> DebReleaseInfo | None:
     )
 
 
+def _cache_dir() -> Path:
+    path = Path.home() / ".cache" / "borg-backup-gui" / "updates"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _check_cache_path() -> Path:
+    return _cache_dir() / "last-check.json"
+
+
+def _load_check_cache() -> dict[str, Any]:
+    path = _check_cache_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_check_cache(snapshot: dict[str, Any]) -> None:
+    payload = {key: snapshot.get(key) for key in _CACHE_STATE_KEYS}
+    path = _check_cache_path()
+    try:
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Update-Cache nicht speicherbar: %s", exc)
+
+
+def _rate_limit_until_from_error(exc: BaseException) -> float:
+    reset_at = 0.0
+    headers = getattr(exc, "headers", None)
+    if headers is not None:
+        raw = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+        if raw:
+            try:
+                reset_at = float(raw)
+            except ValueError:
+                reset_at = 0.0
+    now = time.time()
+    if reset_at > now:
+        return reset_at
+    return now + RATE_LIMIT_BACKOFF_SEC
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    code = getattr(exc, "code", None)
+    if code == 403:
+        return True
+    text = str(exc).lower()
+    return "rate limit" in text or "api rate limit" in text
+
+
 def fetch_latest_release_payload() -> dict[str, Any]:
     request = urllib.request.Request(
         LATEST_URL,
@@ -153,12 +221,81 @@ def get_status() -> dict[str, Any]:
     return snap
 
 
-def check_for_update(current: str | None = None) -> dict[str, Any]:
-    _set_state(phase="checking", error=None, download_percent=0)
+def _apply_cached_result(cache: dict[str, Any], *, cur: str, note: str | None = None) -> dict[str, Any]:
+    latest = str(cache.get("latest_version") or "")
+    available = False
+    phase = str(cache.get("phase") or "up-to-date")
+    deb_name = cache.get("deb_name")
+    deb_url = cache.get("deb_url")
+    deb_size = int(cache.get("deb_size") or 0)
+    sha256_url = cache.get("sha256_url")
+    error = cache.get("error")
+    if latest and phase in {"update-available", "up-to-date"} and not error:
+        available = is_version_newer(latest, cur)
+        phase = "update-available" if available else "up-to-date"
+        if not available:
+            deb_name = deb_url = sha256_url = None
+            deb_size = 0
+    if note and phase == "error":
+        error = note
+    elif note and not available:
+        # Keep success phases but surface that we reused cache.
+        pass
+    snap = _set_state(
+        phase=phase,
+        available=available,
+        latest_version=latest or None,
+        current_version=cur,
+        deb_name=deb_name if available else None,
+        deb_url=deb_url if available else None,
+        deb_size=deb_size if available else 0,
+        sha256_url=sha256_url if available else None,
+        download_path=None,
+        download_percent=0,
+        error=error if phase == "error" else None,
+        checked_at=cache.get("checked_at"),
+        rate_limited_until=cache.get("rate_limited_until"),
+    )
+    if note and phase != "error":
+        snap = _set_state(error=None)
+    return snap
+
+
+def check_for_update(current: str | None = None, *, force: bool = False) -> dict[str, Any]:
+    """Query GitHub for a newer .deb. Cached for :data:`MIN_CHECK_INTERVAL_SEC`.
+
+    ``force=True`` (manual button) bypasses the normal interval but still
+    respects an active rate-limit backoff.
+    """
+    cur = (current or app_version()).strip()
+    now = time.time()
+    cache = _load_check_cache()
+    limited_until = float(cache.get("rate_limited_until") or 0)
+    if limited_until > now:
+        mins = max(1, int((limited_until - now) / 60))
+        msg = f"GitHub Rate-Limit — nächster Check in ca. {mins} Min."
+        return _set_state(
+            phase="error",
+            error=msg,
+            available=False,
+            latest_version=cache.get("latest_version"),
+            checked_at=cache.get("checked_at"),
+            rate_limited_until=limited_until,
+            download_percent=0,
+        )
+    checked_at = float(cache.get("checked_at") or 0)
+    if (
+        not force
+        and checked_at
+        and now - checked_at < MIN_CHECK_INTERVAL_SEC
+        and cache.get("phase") in {"up-to-date", "update-available", "error"}
+    ):
+        return _apply_cached_result(cache, cur=cur)
+
+    _set_state(phase="checking", error=None, download_percent=0, rate_limited_until=None)
     try:
         payload = fetch_latest_release_payload()
         latest = release_to_deb_info(payload)
-        cur = (current or app_version()).strip()
         tag = str(payload.get("tag_name") or "").lstrip("vV") or "?"
         if not latest:
             asset_names = [str(a.get("name") or "") for a in (payload.get("assets") or [])]
@@ -167,15 +304,18 @@ def check_for_update(current: str | None = None) -> dict[str, Any]:
                 + (f" (Assets: {', '.join(asset_names)})" if asset_names else " (0 Assets)")
                 + f" — lokal {cur}"
             )
-            return _set_state(
+            snap = _set_state(
                 phase="error",
                 error=detail,
                 available=False,
                 latest_version=tag,
-                checked_at=time.time(),
+                checked_at=now,
+                rate_limited_until=None,
             )
+            _save_check_cache(snap)
+            return snap
         newer = is_version_newer(latest.version, cur)
-        return _set_state(
+        snap = _set_state(
             phase="update-available" if newer else "up-to-date",
             available=newer,
             latest_version=latest.version,
@@ -187,20 +327,45 @@ def check_for_update(current: str | None = None) -> dict[str, Any]:
             download_path=None,
             download_percent=0,
             error=None,
-            checked_at=time.time(),
+            checked_at=now,
+            rate_limited_until=None,
         )
+        _save_check_cache(snap)
+        return snap
+    except urllib.error.HTTPError as exc:
+        logger.warning("Update-Check HTTP-Fehler: %s", exc)
+        if _is_rate_limit_error(exc):
+            until = _rate_limit_until_from_error(exc)
+            mins = max(1, int((until - time.time()) / 60))
+            snap = _set_state(
+                phase="error",
+                error=f"GitHub Rate-Limit (HTTP {exc.code}) — nächster Check in ca. {mins} Min.",
+                available=False,
+                checked_at=now,
+                rate_limited_until=until,
+            )
+            merged = {**cache, **{k: snap.get(k) for k in _CACHE_STATE_KEYS}}
+            _save_check_cache(merged)
+            return snap
+        snap = _set_state(
+            phase="error",
+            error=f"HTTP {exc.code}: {exc.reason}",
+            available=False,
+            checked_at=now,
+            rate_limited_until=None,
+        )
+        _save_check_cache(snap)
+        return snap
     except urllib.error.URLError as exc:
         logger.warning("Update-Check fehlgeschlagen: %s", exc)
-        return _set_state(phase="error", error=str(exc), available=False, checked_at=time.time())
+        snap = _set_state(phase="error", error=str(exc), available=False, checked_at=now, rate_limited_until=None)
+        _save_check_cache(snap)
+        return snap
     except Exception as exc:
         logger.warning("Update-Check fehlgeschlagen: %s", exc)
-        return _set_state(phase="error", error=str(exc), available=False, checked_at=time.time())
-
-
-def _cache_dir() -> Path:
-    path = Path.home() / ".cache" / "borg-backup-gui" / "updates"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+        snap = _set_state(phase="error", error=str(exc), available=False, checked_at=now, rate_limited_until=None)
+        _save_check_cache(snap)
+        return snap
 
 
 def _file_sha256(path: Path) -> str:

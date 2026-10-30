@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.0.0-rc2
+
+- Update-Check: Ergebnis 6 h cachen, Auto-Check erst nach 2 min; bei HTTP 403 Rate-Limit-Backoff
+
 ## 3.0.0-rc1
 
 - Root-Systemdienst `borg-backup-guid` (systemd) führt Backups und Zeitpläne aus

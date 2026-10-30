@@ -6,7 +6,7 @@ Die GUI läuft als normaler Benutzer. Backups, Wiederherstellungen und Zeitplän
 führt der root-Systemdienst aus; die GUI steuert ihn über einen Unix-Socket (polkit).
 """
 
-__version__ = "3.0.0-rc1"
+__version__ = "3.0.0-rc2"
 
 import datetime
 import fcntl
@@ -483,7 +483,8 @@ class BorgBackupGUI:
         self.master.after(600, self._refresh_archive_profile_combo)
         self.master.after(800, self._ensure_protocol_dir)
         self.master.after(1500, self._purge_old_protocol_pdfs)
-        self.master.after(10000, self._auto_check_app_update)
+        # Delayed auto-check; network calls are also cached in borg_updates (6h).
+        self.master.after(120000, self._auto_check_app_update)
         self._update_prompt_pending = False
 
         if os.geteuid() == 0:
@@ -5461,7 +5462,8 @@ class BorgBackupGUI:
             try:
                 import borg_updates
 
-                status = borg_updates.check_for_update(current=__version__)
+                # Manual button forces a refresh; auto-check uses the 6h cache.
+                status = borg_updates.check_for_update(current=__version__, force=not silent)
             except Exception as exc:
                 status = {"phase": "error", "error": str(exc), "available": False}
 
@@ -5513,7 +5515,7 @@ class BorgBackupGUI:
 
                 status = borg_updates.get_status()
                 if not status.get("available"):
-                    status = borg_updates.check_for_update(current=__version__)
+                    status = borg_updates.check_for_update(current=__version__, force=True)
                 if not status.get("available"):
                     result = status
                 else:
